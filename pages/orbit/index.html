@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Orbit Cache</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="head">
+      <div>
+        <h1>Orbit Cache</h1>
+        <p class="sub">停用插件模块、AstrBot 磁盘缓存、NapCat 协议与文件缓存的自动维护</p>
+      </div>
+      <div class="head-actions">
+        <button id="btn-refresh" class="btn ghost">刷新</button>
+        <button id="btn-dryrun" class="btn ghost">试运行（不删）</button>
+        <button id="btn-sweep" class="btn primary">立即体检</button>
+        <button id="btn-force" class="btn danger">强制全清</button>
+      </div>
+    </header>
+
+    <section class="card" id="dryrun-card" style="display:none">
+      <div class="row">
+        <strong>试运行结果</strong>
+        <span class="muted">只计算，不删除任何文件</span>
+      </div>
+      <div id="dryrun-body"></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>调度状态</strong>
+        <span id="auto-badge" class="badge">加载中…</span>
+      </div>
+      <div id="last-error" class="banner hidden"></div>
+      <div id="schedule" class="kv"></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>四层缓存</strong>
+        <span class="muted">超过阈值才会自动动手</span>
+      </div>
+      <div id="layers" class="layers"></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>NapCat 实例</strong>
+        <div class="head-actions">
+          <button id="btn-reauth" class="btn ghost">重新解析 Token</button>
+          <button id="btn-add-inst" class="btn ghost">添加实例</button>
+        </div>
+      </div>
+      <div id="token-banner" class="banner hidden"></div>
+      <div id="inst-state" class="kv"></div>
+      <div id="inst-list" class="inst-list"></div>
+      <div class="row actions">
+        <button id="btn-save-inst" class="btn primary">保存实例</button>
+      </div>
+      <p class="muted note">
+        <b>每个 NapCat 实例一行</b>：地址、Token、是否启用、协议缓存清理间隔（小时）。
+        多个 Bot 就点「添加实例」加几行，各自独立。
+        <br /><br />
+        Token 不用填——插件每次连接前自动解析，NapCat 重启换了也会自动跟上。
+        如果要连的 NapCat <b>只配了反向连接</b>，它自己不对外监听，
+        任何客户端都连不上，必须先在 NapCat「网络配置」里给它加一个 HTTP 或 WebSocket 服务端。
+      </p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>可调项</strong>
+        <span class="muted">改完点保存，立即生效并重建定时任务</span>
+      </div>
+      <div class="grid">
+        <label class="field small">
+          <span>体检频率（crontab）</span>
+          <input id="sweep_cron" type="text" placeholder="*/15 * * * *" />
+        </label>
+        <label class="field small">
+          <span>AstrBot 缓存阈值 (MiB)</span>
+          <input id="astrbot_cache_threshold_mb" type="number" min="1" />
+        </label>
+        <label class="field small">
+          <span>NapCat 文件缓存阈值 (MiB)</span>
+          <input id="napcat_cache_threshold_mb" type="number" min="1" />
+        </label>
+        <label class="field small">
+          <span>可删文件最小年龄 (分钟)</span>
+          <input id="napcat_cache_min_age_minutes" type="number" min="0" />
+        </label>
+        <label class="field small">
+          <span>协议缓存清理间隔 (小时)</span>
+          <input id="napcat_protocol_interval_hours" type="number" min="1" />
+        </label>
+        <div class="field small toggles">
+          <label class="check">
+            <input id="auto_enabled" type="checkbox" />
+            <span>自动清理总开关</span>
+          </label>
+          <label class="check">
+            <input id="auto_clean_plugin_modules" type="checkbox" />
+            <span>自动清理停用插件模块</span>
+          </label>
+          <label class="check">
+            <input id="auto_adopt_cache_dirs" type="checkbox" />
+            <span>自动接管搜索到的缓存目录</span>
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <span>NapCat 缓存目录（留空 = 自动接管搜索到的目录；手填则优先用手填的）</span>
+        <textarea id="napcat_cache_dirs" rows="3" placeholder="留空即可自动接管"></textarea>
+      </div>
+      <div class="row actions">
+        <button id="btn-discover" class="btn ghost">自动探测目录</button>
+        <button id="btn-save" class="btn primary">保存</button>
+      </div>
+      <div id="discover" class="discover"></div>
+    </section>
+    <section class="card">
+      <div class="row">
+        <strong>插件模块占用</strong>
+        <span class="muted">停用后本插件会立刻自动清理</span>
+      </div>
+      <div id="plugins" class="plugins"></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>清理历史</strong>
+        <span id="history-count" class="muted"></span>
+      </div>
+      <div id="history" class="results"></div>
+    </section>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

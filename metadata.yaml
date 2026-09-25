@@ -1,0 +1,23 @@
+name: astrbot_plugin_orbit_command
+display_name: Orbit Cache
+short_desc: 缓存用完就扔的自动清洁工。
+desc: |
+  把会越攒越多的东西定期扫掉：停用插件的内存、NapCat 的图片与文件缓存、
+  NapCat 协议缓存、AstrBot 临时文件。
+
+  装上就干活。停用插件时顺手清内存，到点自动清缓存，缓存目录自己搜自己认。
+  你只需要点一次「试运行」，看看它到底会删什么。
+version: "1.0.1"
+author: 娜莉灵
+repo: https://github.com/nabbing/astrbot_plugin_orbit_command
+astrbot_version: ">=4.27.5,<5"
+support_platforms:
+  - aiocqhttp
+license: AGPL-3.0-only
+tags:
+  - 缓存清理
+  - 自动维护
+  - NapCat
+  - AstrBot
+  - 插件管理
+  - 运维

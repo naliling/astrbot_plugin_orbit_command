@@ -1,0 +1,105 @@
+{
+  "onebot_instances": {
+    "type": "list",
+    "description": "NapCat 实例列表（一般不用手填）",
+    "hint": "每个 NapCat 算一行，可加多个 Bot。建议在插件面板里编辑，填好后 Token 留空即可自动解析。",
+    "default": []
+  },
+  "onebot_base_url": {
+    "type": "string",
+    "description": "NapCat 服务端地址（单实例兼容项）",
+    "hint": "只在没有用 onebot_instances 时才读它。HTTP 服务端填 http://host:port，WebSocket 服务端填 ws://host:port。",
+    "default": "http://127.0.0.1:3000"
+  },
+  "onebot_access_token": {
+    "type": "string",
+    "description": "NapCat Access Token（一般不用手填）",
+    "hint": "留空即可：插件每次连接前自动解析，NapCat 重启换了 Token 也会自动跟上。只有自动解析失败时才需要手填。",
+    "default": "",
+    "secret": true
+  },
+  "napcat_config_dirs": {
+    "type": "list",
+    "description": "额外搜索根（很少需要）",
+    "hint": "留空即可。留空时插件从 AstrBot 自身位置及其父目录出发做有上限的广度搜索，不认固定路径。",
+    "default": []
+  },
+  "auto_enabled": {
+    "type": "bool",
+    "description": "自动清理总开关",
+    "hint": "关掉就不再按计划体检，插件卸载时的模块清理也会停。想临时停一下，在面板上点一下比改这里方便。",
+    "default": true
+  },
+  "sweep_cron": {
+    "type": "string",
+    "description": "体检频率（crontab）",
+    "hint": "默认每 15 分钟。日常保持默认即可；想固定在深夜可以填 30 3 * * *（每天凌晨 3 点半）。",
+    "default": "*/15 * * * *"
+  },
+  "auto_clean_plugin_modules": {
+    "type": "bool",
+    "description": "自动清理停用插件模块",
+    "hint": "强烈建议保持开启。AstrBot 停用插件时不会清内存，靠这一项兜住泄漏。",
+    "default": true
+  },
+  "auto_adopt_cache_dirs": {
+    "type": "bool",
+    "description": "自动接管搜索到的缓存目录",
+    "hint": "开启时只要 napcat_cache_dirs 留空，插件就自己接管判定安全的缓存目录，无需逐个添加。",
+    "default": true
+  },
+  "napcat_cache_dirs": {
+    "type": "list",
+    "description": "NapCat 缓存目录（留空则自动接管）",
+    "hint": "一般留空即可。不要填 NapCat 实例根目录（里面含 config/ 与程序本体），只填它下面的 temp 或 cache 子目录。",
+    "default": []
+  },
+  "napcat_cache_threshold_mb": {
+    "type": "int",
+    "description": "NapCat 文件缓存阈值 (MiB)",
+    "hint": "超过这个值才清理，删到 85% 为止。默认 1 MiB——刻意定得很低，这样缓存稍微涨一点就会动手，你能直观看到它在干活。想更保守可以调大。",
+    "default": 1
+  },
+  "napcat_cache_min_age_minutes": {
+    "type": "int",
+    "description": "可清理文件最小年龄（分钟）",
+    "hint": "正在使用的临时文件不会被删。建议不要调到 0 以下，保持默认 10 分钟最稳。",
+    "default": 10
+  },
+  "astrbot_cache_threshold_mb": {
+    "type": "int",
+    "description": "AstrBot 磁盘缓存阈值 (MiB)",
+    "hint": "超过这个值才清理。默认 16 MiB，刻意定低以保证能真正触发；AstrBot 自己的 StorageCleaner 清的就是临时缓存，删了会重新生成。",
+    "default": 16
+  },
+  "napcat_protocol_interval_hours": {
+    "type": "int",
+    "description": "NapCat 协议缓存清理间隔（小时）",
+    "hint": "距上次清理超过这个时长才会再次调用。默认 12 小时，一天两次，对个人 Bot 足够。",
+    "default": 12
+  },
+  "request_timeout_seconds": {
+    "type": "int",
+    "description": "HTTP 请求超时（秒）",
+    "hint": "网络特别差时可以调大。默认 10 秒一般够用。",
+    "default": 10
+  },
+  "verify_tls": {
+    "type": "bool",
+    "description": "验证 HTTPS 证书",
+    "hint": "用 wss:// 或 https:// 且是自签证书时才需要关掉，否则保持开启更安全。",
+    "default": true
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "最大并发请求数",
+    "hint": "同时探测多个 NapCat 实例时才用得上，默认 2 即可。",
+    "default": 2
+  },
+  "request_interval_ms": {
+    "type": "int",
+    "description": "请求起始间隔（毫秒）",
+    "hint": "对 NapCat 限速，默认 100 毫秒。",
+    "default": 100
+  }
+}
