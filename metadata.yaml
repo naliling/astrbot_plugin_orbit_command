@@ -9,7 +9,7 @@ desc: |
   你只需要点一次「试运行」，看看它到底会删什么。
 version: "1.0.1"
 author: 娜莉灵
-repo: https://github.com/nabbing/astrbot_plugin_orbit_command
+repo: https://github.com/naliling/astrbot_plugin_orbit_command
 astrbot_version: ">=4.27.5,<5"
 support_platforms:
   - aiocqhttp
