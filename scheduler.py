@@ -15,29 +15,71 @@ from .maintenance import (
     ModuleCacheError,
     ModuleCacheManager,
     NapCatCacheDirectoryCleaner,
+    _MEDIA_EXTENSIONS,
 )
 from .napcat import NapCatCacheClient
+from .spaces import log_retention_clean, log_retention_plan
 
 MIB = 1024 * 1024
 
-LAYERS = ("modules", "astrbot", "napcat_files", "napcat_protocol")
+LAYERS = (
+    "modules",
+    "astrbot",
+    "astrbot_logs",
+    "napcat_files",
+    "napcat_protocol",
+    "media_files",
+)
 
 LAYER_LABELS = {
     "modules": "停用插件模块",
     "astrbot": "AstrBot 磁盘缓存",
+    "astrbot_logs": "AstrBot 日志",
     "napcat_files": "NapCat 文件缓存",
     "napcat_protocol": "NapCat 协议缓存",
+    "media_files": "自选目录媒体文件",
 }
 
 _HISTORY_LIMIT = 200
 _AUTO_DIR_TTL = 1800.0
 
+# 连续这么多次体检都连不上，才提示「可能已停用」。只提示不提供删除：
+# 「停用」和「此刻没启动」在这里无法区分，误删一个在跑的 bot 比多一条提示糟得多。
+_UNREACHABLE_LIMIT = 3
+
+# 「连续失联」计数最多隔这么久才推进一次。面板每 30 秒刷一次，不设闸的话
+# 一个只是暂时没启动的 bot 会在半小时内被推成「长期失联」。
+_REACH_ADVANCE_INTERVAL = 900.0
+
 _SETTING_BOUNDS = {
     "astrbot_cache_threshold_mb": (1, 1024 * 1024),
+    "astrbot_logs_threshold_mb": (1, 1024 * 1024),
     "napcat_cache_threshold_mb": (1, 1024 * 1024),
     "napcat_cache_min_age_minutes": (0, 10080),
     "napcat_protocol_interval_hours": (1, 24 * 365),
+    "media_threshold_mb": (1, 1024 * 1024),
+    "media_min_age_days": (1, 3650),
+    "log_retention_days": (0, 3650),
 }
+
+# 外观偏好。存在插件配置里而不是只靠浏览器 localStorage：
+# 面板跑在 iframe 里，沙箱一旦没给 allow-same-origin，localStorage 会直接抛
+# SecurityError，写入静默失败，自定义主色就“保存不住”。
+_UI_THEMES = ("deep", "cyber", "matrix", "light")
+
+
+def validate_accent(value: Any) -> str:
+    """校验 #rgb / #rrggbb。返回空串表示合法。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("#") or len(text) not in (4, 7):
+        return "主色要写成 #rgb 或 #rrggbb 的形式"
+    try:
+        int(text[1:], 16)
+    except ValueError:
+        return f"主色「{text}」不是合法的十六进制颜色"
+    return ""
 
 _TARGET_RATIO = 0.85
 
@@ -60,6 +102,82 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
         encoding="utf-8",
     )
     tmp.replace(path)
+
+
+# cron 字段的范围：(最小, 最大)。day-of-week 用 0-7，7 与 0 都表示周日。
+_CRON_FIELDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_NAMES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
+}
+
+
+def _cron_value(token: str, low: int, high: int) -> int | None:
+    text = token.strip().lower()
+    if text in _CRON_NAMES:
+        return _CRON_NAMES[text]
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    # day-of-week 允许写 7 表示周日
+    return value if low <= value <= (7 if high == 7 else high) else None
+
+
+def validate_cron(expression: str) -> str:
+    """校验五段 crontab。返回空串表示合法，否则返回给用户看的原因。
+
+    之前只数了一下是不是五段，`99 99 99 99 99` 这种也能存进去，
+    然后定时任务注册静默失败，面板上却显示已保存。
+    """
+    text = str(expression or "").strip()
+    if not text:
+        return "体检频率不能为空"
+    parts = text.split()
+    if len(parts) != 5:
+        return f"体检频率需要是五段标准 crontab，你填了 {len(parts)} 段"
+    labels = ("分钟", "小时", "日", "月", "星期")
+    for part, (low, high), label in zip(parts, _CRON_FIELDS, labels):
+        for chunk in part.split(","):
+            step = chunk.split("/")
+            if len(step) > 2:
+                return f"{label}字段「{chunk}」的 / 写法不对"
+            if len(step) == 2:
+                try:
+                    if int(step[1]) <= 0:
+                        return f"{label}字段的步长必须大于 0"
+                except ValueError:
+                    return f"{label}字段的步长「{step[1]}」不是数字"
+            base = step[0]
+            if base == "*":
+                continue
+            bounds = base.split("-")
+            for item in bounds:
+                if _cron_value(item, low, high) is None:
+                    return f"{label}字段「{item}」超出范围（{low}-{high}）"
+            if len(bounds) == 2:
+                start = _cron_value(bounds[0], low, high)
+                end = _cron_value(bounds[1], low, high)
+                # 反向区间（5-1）大部分实现会直接报错，别放它过去
+                if start is not None and end is not None and start > end:
+                    return f"{label}字段的区间「{base}」起点比终点大"
+    return ""
+
+
+def _astrbot_target(status: Any, target: str) -> tuple[int, str]:
+    """从 StorageCleaner.get_status() 里取某一块的 (字节数, 展示文案)。
+
+    上游一次就把 logs 与 cache 都返回了，所以两层共用一次扫描结果。
+    """
+    block = status.get(target, {}) if isinstance(status, dict) else {}
+    if not isinstance(block, dict):
+        return 0, "0 个文件"
+    try:
+        size = int(block.get("size_bytes", 0) or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return size, f"{block.get('file_count', 0)} 个文件"
 
 
 class SweepEngine:
@@ -93,6 +211,7 @@ class SweepEngine:
         self._schedule: dict[str, Any] = {"cron": "", "next_run": "", "job_id": ""}
         self._auto_dirs: list[dict[str, Any]] = []
         self._auto_dirs_at = 0.0
+        self._reach_at = 0.0
 
     # ---------- 缓存目录：手动优先，否则自动接管 ----------
 
@@ -127,7 +246,9 @@ class SweepEngine:
                 "Orbit Cache 自动接管缓存目录扫描失败：%s", type(exc).__name__
             )
             return self._cached_auto_dirs()
-        self._auto_dirs = [row for row in rows if row.get("safe")]
+        self._auto_dirs = [
+            row for row in rows if row.get("safe") and not row.get("truncated")
+        ]
         self._auto_dirs_at = time.monotonic()
         if self._auto_dirs:
             logger.info(
@@ -174,6 +295,22 @@ class SweepEngine:
             return [str(item).strip() for item in value if str(item).strip()]
         return []
 
+    def _theme_pref(self) -> str:
+        value = str(self._config.get("ui_theme", "") or "").strip()
+        return value if value in _UI_THEMES else ""
+
+    def _accent_pref(self) -> str:
+        value = str(self._config.get("ui_accent", "") or "").strip().lower()
+        return value if not validate_accent(value) else ""
+
+    def _media_dirs(self) -> list[str]:
+        value = self._config.get("media_dirs", [])
+        if isinstance(value, str):
+            return [line.strip() for line in value.splitlines() if line.strip()]
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
     def _token_dirs(self) -> list[str]:
         """用户显式指定的额外搜索根。"""
         value = self._config.get("napcat_config_dirs", [])
@@ -201,6 +338,9 @@ class SweepEngine:
             "astrbot_cache_threshold_mb": self._int(
                 "astrbot_cache_threshold_mb", 16, *_SETTING_BOUNDS["astrbot_cache_threshold_mb"]
             ),
+            "astrbot_logs_threshold_mb": self._int(
+                "astrbot_logs_threshold_mb", 16, *_SETTING_BOUNDS["astrbot_logs_threshold_mb"]
+            ),
             "napcat_cache_threshold_mb": self._int(
                 "napcat_cache_threshold_mb", 1, *_SETTING_BOUNDS["napcat_cache_threshold_mb"]
             ),
@@ -211,6 +351,18 @@ class SweepEngine:
                 "napcat_protocol_interval_hours", 12, *_SETTING_BOUNDS["napcat_protocol_interval_hours"]
             ),
             "napcat_cache_dirs": self._dirs(),
+            "media_dirs": self._media_dirs(),
+            "media_threshold_mb": self._int(
+                "media_threshold_mb", 512, *_SETTING_BOUNDS["media_threshold_mb"]
+            ),
+            "media_min_age_days": self._int(
+                "media_min_age_days", 30, *_SETTING_BOUNDS["media_min_age_days"]
+            ),
+            "log_retention_days": self._int(
+                "log_retention_days", 0, *_SETTING_BOUNDS["log_retention_days"]
+            ),
+            "ui_theme": self._theme_pref(),
+            "ui_accent": self._accent_pref(),
             "target_ratio": _TARGET_RATIO,
         }
 
@@ -226,10 +378,9 @@ class SweepEngine:
 
         if "sweep_cron" in payload:
             expression = str(payload["sweep_cron"] or "").strip()
-            if not expression:
-                errors.append("体检频率不能为空")
-            elif len(expression.split()) != 5:
-                errors.append("体检频率需要是五段标准 crontab 表达式")
+            problem = validate_cron(expression)
+            if problem:
+                errors.append(problem)
             else:
                 self._config["sweep_cron"] = expression
 
@@ -255,6 +406,38 @@ class SweepEngine:
             else:
                 values = []
             self._config["napcat_cache_dirs"] = values
+
+        if "media_dirs" in payload:
+            raw = payload["media_dirs"]
+            if isinstance(raw, str):
+                values = [line.strip() for line in raw.splitlines() if line.strip()]
+            elif isinstance(raw, list):
+                values = [str(item).strip() for item in raw if str(item).strip()]
+            else:
+                values = []
+            # 先试建一次：不合法就当场报错，而且**不写盘**。
+            # 之前是先报错、再把值存进去，用户看到「没保存」但配置其实已经变了。
+            try:
+                self._build_media_cleaner(values)
+            except ValueError as exc:
+                errors.append(f"自选目录配置有误：{exc}")
+            else:
+                self._config["media_dirs"] = values
+
+        if "ui_theme" in payload:
+            value = str(payload["ui_theme"] or "").strip()
+            if value and value not in _UI_THEMES:
+                errors.append(f"未知的配色：{value}")
+            else:
+                self._config["ui_theme"] = value
+
+        if "ui_accent" in payload:
+            value = str(payload["ui_accent"] or "").strip().lower()
+            problem = validate_accent(value)
+            if problem:
+                errors.append(problem)
+            else:
+                self._config["ui_accent"] = value
 
         self._config.save_config()
         self._invalidate_fs_cleaner()
@@ -295,13 +478,37 @@ class SweepEngine:
         self.fs_cleaner()
         return self._fs_error
 
+    # ---------- 自选目录媒体文件清理器 ----------
+
+    def _build_media_cleaner(self, directories: list[str]) -> NapCatCacheDirectoryCleaner:
+        settings = self.settings()
+        return NapCatCacheDirectoryCleaner(
+            directories,
+            threshold_mb=settings["media_threshold_mb"],
+            min_age_minutes=settings["media_min_age_days"] * 24 * 60,
+            target_ratio=_TARGET_RATIO,
+            extensions=_MEDIA_EXTENSIONS,
+        )
+
+    def media_cleaner(self) -> tuple[NapCatCacheDirectoryCleaner, str]:
+        """返回 (清理器, 错误文案)。目录没填就是关着的。"""
+        directories = self._media_dirs()
+        if not directories:
+            return NapCatCacheDirectoryCleaner([]), ""
+        try:
+            return self._build_media_cleaner(directories), ""
+        except ValueError as exc:
+            return NapCatCacheDirectoryCleaner([]), str(exc)
+
     # ---------- 状态与历史 ----------
 
     def _load_state(self) -> dict[str, Any]:
         default = {
             "layers": {},
+            "unreachable": {},
             "last_sweep_at": "",
             "last_freed_bytes": 0,
+            "total_freed_bytes": 0,
             "sweep_count": 0,
         }
         try:
@@ -381,6 +588,8 @@ class SweepEngine:
             cleaner.status(),
             return_exceptions=True,
         )
+        # collect() 本来就探测了，直接拿这份结果推进失联计数，不额外发请求
+        self._note_reachability(remote)
         fs_bytes = 0
         fs_files = 0
         if isinstance(napcat_fs, Exception):
@@ -389,17 +598,25 @@ class SweepEngine:
             fs_bytes = sum(int(item.size_bytes) for item in napcat_fs)
             fs_files = sum(int(item.file_count) for item in napcat_fs)
             fs_detail = f"{len(cleaner.directories)} 个目录 / {fs_files} 个文件"
+            if any(getattr(item, "truncated", False) for item in napcat_fs):
+                fs_detail += "（有目录未测完，占用可能偏低）"
 
         settings = self.settings()
         threshold_fs = settings["napcat_cache_threshold_mb"] * MIB
         threshold_astrbot = settings["astrbot_cache_threshold_mb"] * MIB
+        threshold_logs = settings["astrbot_logs_threshold_mb"] * MIB
+        media_cleaner, media_error = self.media_cleaner()
+        media_scans = await media_cleaner.status()
+        media_bytes = sum(int(item.size_bytes) for item in media_scans)
+        threshold_media = settings["media_threshold_mb"] * MIB
+        has_media = bool(media_cleaner.directories)
+        astrbot_bytes, astrbot_detail, logs_bytes, logs_detail = 0, "", 0, ""
         if isinstance(astrbot_cache, Exception):
-            astrbot_bytes = 0
             astrbot_detail = f"读取失败（{type(astrbot_cache).__name__}）"
+            logs_detail = astrbot_detail
         else:
-            cache = astrbot_cache.get("cache", {}) if isinstance(astrbot_cache, dict) else {}
-            astrbot_bytes = int(cache.get("size_bytes", 0) or 0)
-            astrbot_detail = f"{cache.get('file_count', 0)} 个文件"
+            astrbot_bytes, astrbot_detail = _astrbot_target(astrbot_cache, "cache")
+            logs_bytes, logs_detail = _astrbot_target(astrbot_cache, "logs")
 
         protocol_state = self._layer_state("napcat_protocol")
         instance_state = self._instance_state()
@@ -421,10 +638,11 @@ class SweepEngine:
                 "cron_effective": self._schedule.get("cron", ""),
             },
             "totals": {
-                "reclaimable_bytes": astrbot_bytes + fs_bytes,
+                "reclaimable_bytes": astrbot_bytes + logs_bytes + fs_bytes + media_bytes,
                 "reclaimable_modules": reclaimable_modules,
                 "last_sweep_at": self._state.get("last_sweep_at", ""),
                 "last_freed_bytes": self._state.get("last_freed_bytes", 0),
+                "total_freed_bytes": self._state.get("total_freed_bytes", 0),
                 "sweep_count": self._state.get("sweep_count", 0),
             },
             "napcat": {
@@ -474,6 +692,20 @@ class SweepEngine:
                     "directories": [],
                     "last": self._layer_state("astrbot"),
                 },
+                "astrbot_logs": {
+                    "label": LAYER_LABELS["astrbot_logs"],
+                    "current": logs_bytes,
+                    "unit": "bytes",
+                    "amount": f"{human_bytes(logs_bytes)} / 阈值 {human_bytes(threshold_logs)}",
+                    "threshold": threshold_logs,
+                    "ratio": _ratio(logs_bytes, threshold_logs),
+                    "due": logs_bytes > threshold_logs,
+                    "enabled": True,
+                    "detail": logs_detail,
+                    "config_error": "",
+                    "directories": [],
+                    "last": self._layer_state("astrbot_logs"),
+                },
                 "napcat_files": {
                     "label": LAYER_LABELS["napcat_files"],
                     "current": fs_bytes,
@@ -521,6 +753,37 @@ class SweepEngine:
                     "directories": [],
                     "last": protocol_state,
                 },
+                "media_files": {
+                    "label": LAYER_LABELS["media_files"],
+                    "current": media_bytes,
+                    "unit": "bytes",
+                    "amount": (
+                        f"{human_bytes(media_bytes)} / 阈值 {human_bytes(threshold_media)}"
+                        if has_media
+                        else "未填目录（默认关着）"
+                    ),
+                    "threshold": threshold_media if has_media else None,
+                    "ratio": _ratio(media_bytes, threshold_media) if has_media else None,
+                    "due": media_bytes > threshold_media and has_media,
+                    "enabled": has_media,
+                    "detail": (
+                        f"{len(media_cleaner.directories)} 个目录 / "
+                        f"只删超过 {settings['media_min_age_days']} 天的图片视频音频"
+                    ),
+                    "config_error": media_error,
+                    "directories": [
+                        {
+                            "path": str(item.path),
+                            "exists": item.exists,
+                            "file_count": item.file_count,
+                            "size_bytes": item.size_bytes,
+                            "skipped_symlinks": item.skipped_symlinks,
+                            "error": item.error,
+                        }
+                        for item in media_scans
+                    ],
+                    "last": self._layer_state("media_files"),
+                },
             },
             "module_rows": modules,
         }
@@ -552,6 +815,9 @@ class SweepEngine:
         freed = sum(int(item.get("freed_bytes", 0)) for item in records)
         self._state["last_sweep_at"] = _now_iso()
         self._state["last_freed_bytes"] = freed
+        self._state["total_freed_bytes"] = (
+            int(self._state.get("total_freed_bytes", 0) or 0) + freed
+        )
         self._state["sweep_count"] = int(self._state.get("sweep_count", 0)) + 1
         await self._persist()
         await self._push_history(records)
@@ -584,8 +850,10 @@ class SweepEngine:
             handler = {
                 "modules": self._run_modules,
                 "astrbot": self._run_astrbot,
+                "astrbot_logs": self._run_astrbot_logs,
                 "napcat_files": self._run_napcat_files,
                 "napcat_protocol": self._run_napcat_protocol,
+                "media_files": self._run_media_files,
             }[layer]
             await handler(record, force)
         except Exception as exc:  # 单层失败不能中断其他层
@@ -627,19 +895,65 @@ class SweepEngine:
 
     async def _run_astrbot(self, record: dict[str, Any], force: bool) -> None:
         threshold = self.settings()["astrbot_cache_threshold_mb"] * MIB
-        size = await self.astrbot_cache.size_bytes()
+        await self._run_astrbot_target(record, force, "cache", threshold)
+
+    async def _run_astrbot_logs(self, record: dict[str, Any], force: bool) -> None:
+        days = self.settings()["log_retention_days"]
+        if days > 0:
+            await self._run_log_retention(record, days)
+            return
+        threshold = self.settings()["astrbot_logs_threshold_mb"] * MIB
+        await self._run_astrbot_target(record, force, "logs", threshold)
+
+    async def _run_log_retention(self, record: dict[str, Any], days: int) -> None:
+        """按保留天数清日志。
+
+        不能用上游的 cleanup("logs")：它对非活跃日志是直接 unlink，不看新旧，
+        一次就会把 logs 目录清光，连昨天的 astrbot.log.1 都没。当前正在写的
+        astrbot.log 也一律不碰——删掉被打开的文件不会马上释放空间，
+        之后的新日志会写进那个已删除的 inode，表现为「日志不见了」。
+        """
+        plan = await log_retention_plan(days)
+        candidates = plan.get("candidates", [])
+        record["detail"] = (
+            f"保留 {days} 天，当前日志 {plan.get('kept_current', 0)} 个不删，"
+            f"超期 {len(candidates)} 个"
+        )
+        if not candidates:
+            record["skipped"] = f"没有超过 {days} 天的日志"
+            return
+        result = await log_retention_clean(days)
+        record["items"] = int(result.get("deleted_files", 0))
+        record["freed_bytes"] = int(result.get("freed_bytes", 0))
+        record["acted"] = record["items"] > 0
+        record["detail"] = (
+            f"删除 {record['items']} 个超期日志，释放 {record['freed_bytes']} 字节，"
+            f"失败 {result.get('failed_files', 0)}，当前日志 {result.get('kept_current', 0)} 个未动"
+        )
+        if not record["acted"]:
+            record["skipped"] = "超期日志没能删掉"
+
+    async def _run_astrbot_target(
+        self, record: dict[str, Any], force: bool, target: str, threshold: int
+    ) -> None:
+        """cache 与 logs 共用同一套判定与记账，只有 target 与阈值不同。"""
+        size = await self.astrbot_cache.size_bytes(target)
         record["detail"] = f"当前占用 {size} 字节，阈值 {threshold} 字节"
         if size <= threshold and not force:
             record["skipped"] = f"占用 {size} 字节未超过阈值 {threshold} 字节"
             return
-        result = await self.astrbot_cache.clean()
-        record["acted"] = True
+        result = await self.astrbot_cache.clean(target)
         record["freed_bytes"] = int(result.get("removed_bytes", 0) or 0)
         record["items"] = int(result.get("processed_files", 0) or 0)
+        # acted 必须是「真的动了手」，不是「调过了接口」：目录本来就是干净的话
+        # 强制清理会返回 0 字节，谎报已清理只会让人以为插件没用。
+        record["acted"] = record["freed_bytes"] > 0 or record["items"] > 0
         record["detail"] = (
             f"处理 {record['items']} 个文件，释放 {record['freed_bytes']} 字节，"
             f"失败 {result.get('failed_files', 0)}"
         )
+        if not record["acted"]:
+            record["skipped"] = "已执行，但本来就没有可清理的内容"
 
     async def _run_napcat_files(self, record: dict[str, Any], force: bool) -> None:
         await self.auto_dirs()
@@ -658,18 +972,49 @@ class SweepEngine:
             record["skipped"] = f"占用 {total} 字节未超过阈值 {threshold} 字节"
             return
         results = await cleaner.clean_once(force=force)
-        record["acted"] = True
         record["freed_bytes"] = sum(int(item["deleted_bytes"]) for item in results)
         record["items"] = sum(int(item["deleted_files"]) for item in results)
+        record["acted"] = record["freed_bytes"] > 0 or record["items"] > 0
         record["detail"] = "；".join(
             f"{item['path']} 删除 {item['deleted_files']} 个 / {item['deleted_bytes']} 字节"
             for item in results
         )
+        if not record["acted"]:
+            record["skipped"] = "已执行，但没有符合条件的文件可删"
 
     def _instance_state(self) -> dict[str, Any]:
         entry = self._state["layers"].get("napcat_protocol", {})
         value = entry.get("instances") if isinstance(entry, dict) else None
         return value if isinstance(value, dict) else {}
+
+    async def _run_media_files(self, record: dict[str, Any], force: bool) -> None:
+        cleaner, error = self.media_cleaner()
+        if error:
+            record["error"] = error
+            return
+        if not cleaner.directories:
+            record["skipped"] = "没有填自选目录，这层默认关着"
+            return
+        scans = await cleaner.status()
+        total = sum(int(item.size_bytes) for item in scans)
+        threshold = cleaner.threshold_bytes
+        record["detail"] = (
+            f"媒体文件合计 {total} 字节，阈值 {threshold} 字节；"
+            f"最小保留 {self.settings()['media_min_age_days']} 天"
+        )
+        if total <= threshold and not force:
+            record["skipped"] = f"媒体文件 {total} 字节未超过阈值 {threshold} 字节"
+            return
+        results = await cleaner.clean_once(force=force)
+        record["freed_bytes"] = sum(int(item["deleted_bytes"]) for item in results)
+        record["items"] = sum(int(item["deleted_files"]) for item in results)
+        record["acted"] = record["freed_bytes"] > 0 or record["items"] > 0
+        record["detail"] = "；".join(
+            f"{item['path']} 删除 {item['deleted_files']} 个 / {item['deleted_bytes']} 字节"
+            for item in results
+        )
+        if not record["acted"]:
+            record["skipped"] = "已执行，但没有超龄的媒体文件可删"
 
     def _protocol_due_for(self, url: str, interval_hours: int) -> bool:
         last = self._instance_state().get(url, {}).get("last_run_at")
@@ -718,6 +1063,129 @@ class SweepEngine:
         if not record["acted"]:
             record["skipped"] = "所有实例都未到清理时间"
 
+    # ---------- 死实例探测：只报告，不自动删 ----------
+
+    def _unreachable_counters(self) -> dict[str, int]:
+        value = self._state.get("unreachable")
+        return value if isinstance(value, dict) else {}
+
+    def _note_reachability(self, rows: Any) -> None:
+        """用 collect() 已经取到的探测结果推进「连续失联」计数，不额外发请求。
+
+        推进带时间闸：面板每 30 秒刷一次，不设闸的话一个只是暂时没启动的 bot
+        会在半小时内被推成「长期失联」。也不能放进 sweep()——那会让每次体检
+        先干等一轮网络探测（每个实例最长 10 秒超时），点「强制清理」像是没反应。
+        """
+        if not isinstance(rows, list):
+            return
+        now = time.monotonic()
+        if (now - self._reach_at) < _REACH_ADVANCE_INTERVAL:
+            return
+        self._reach_at = now
+        counters = self._unreachable_counters()
+        for row in rows:
+            url = str(row.get("url", ""))
+            if not url:
+                continue
+            if row.get("connected"):
+                counters.pop(url, None)
+            else:
+                counters[url] = int(counters.get(url, 0)) + 1
+        known = {endpoint.label for endpoint in self.napcat_client.endpoints}
+        # 实例被从配置里删掉后，计数不能一直留着
+        self._state["unreachable"] = {k: v for k, v in counters.items() if k in known}
+
+    async def _login_account(self, endpoint: Any) -> str:
+        """取实例登录的 QQ 号，取不到就返回空串。"""
+        try:
+            info = await self.napcat_client._call(endpoint, "get_login_info")
+        except Exception:
+            return ""
+        if not isinstance(info, dict):
+            return ""
+        user_id = info.get("user_id")
+        return str(user_id) if user_id not in (None, "") else ""
+
+    async def dead_instances(self) -> list[dict[str, Any]]:
+        """找出疑似冗余的 NapCat 实例。
+
+        高置信（可一键删）：配置里地址完全重复；两个实例登录后是同一个 QQ 号。
+        低置信（只提示）：连续多次探测连不上——停用与暂时下线无法区分，不给删除。
+        两种情况都只动配置里那一行，绝不碰 NapCat 磁盘上的任何东西。
+
+        每个发现项带 occurrence（这是第几个同地址的条目），因为删除是按
+        「地址 + 第几个」定位的：同地址重复时，光靠地址会删到要保留的那一行。
+        """
+        endpoints = self.napcat_client.endpoints
+        if len(endpoints) < 2:
+            return []
+        rows = await self.napcat_client.status()
+        counters = self._unreachable_counters()
+        findings: list[dict[str, Any]] = []
+        seen: set[int] = set()
+
+        first_index: dict[str, int] = {}
+        seen_count: dict[str, int] = {}
+        for index, endpoint in enumerate(endpoints):
+            url = endpoint.url
+            occurrence = seen_count.get(url, 0)
+            seen_count[url] = occurrence + 1
+            first_index.setdefault(url, index)
+            if occurrence == 0:
+                continue
+            seen.add(index)
+            findings.append({
+                "url": endpoint.label,
+                "index": index,
+                "occurrence": occurrence,
+                "reason": f"地址与第 {first_index[url] + 1} 行完全相同",
+                "confidence": "high",
+                "removable": True,
+            })
+
+        first_by_account: dict[str, int] = {}
+        for index, endpoint in enumerate(endpoints):
+            if index in seen:
+                continue  # 已经是重复地址，不用再探登录
+            account = await self._login_account(endpoint)
+            if not account:
+                continue
+            previous = first_by_account.get(account)
+            if previous is None:
+                first_by_account[account] = index
+                continue
+            seen.add(index)
+            findings.append({
+                "url": endpoint.label,
+                "index": index,
+                "occurrence": 0,
+                "reason": f"与第 {previous + 1} 行登录的是同一个 QQ 号 {account}",
+                "confidence": "high",
+                "removable": True,
+            })
+
+        for row in rows:
+            url = str(row.get("url", ""))
+            # 计数由体检推进，这里只读，所以面板上也能看到低置信提示
+            count = int(counters.get(url, 0))
+            index = next(
+                (i for i, e in enumerate(endpoints) if e.label == url), -1
+            )
+            if count < _UNREACHABLE_LIMIT or index in seen:
+                continue
+            seen.add(index)
+            detail = str(row.get("error", ""))[:80]
+            suffix = f"（{detail}）" if detail else ""
+            findings.append({
+                "url": url,
+                "index": index,
+                "occurrence": 0,
+                "reason": f"连续 {count} 次体检连不上{suffix}",
+                "confidence": "low",
+                "removable": False,
+            })
+        return findings
+
     async def dry_run(self, *, force: bool = False) -> dict[str, Any]:
         """试运行：只算不删，回答「到底会不会真的删东西」。
 
@@ -726,13 +1194,19 @@ class SweepEngine:
         await self.auto_dirs()
         cleaner = self.fs_cleaner()
         previews = await cleaner.preview(force=force)
+        media_cleaner, _ = self.media_cleaner()
+        media_previews = await media_cleaner.preview(force=force)
+        retention = await log_retention_plan(self.settings()["log_retention_days"])
         threshold = self.settings()["napcat_cache_threshold_mb"] * MIB
         total_files = sum(item["would_delete_files"] for item in previews)
         total_bytes = sum(item["would_delete_bytes"] for item in previews)
         astrbot_size = 0
+        logs_size = 0
         astrbot_error = ""
         try:
-            astrbot_size = await self.astrbot_cache.size_bytes()
+            source = await self.astrbot_cache.status()
+            astrbot_size, _ = _astrbot_target(source, "cache")
+            logs_size, _ = _astrbot_target(source, "logs")
         except Exception as exc:
             astrbot_error = f"{type(exc).__name__}: {exc}"[:120]
         return {
@@ -740,8 +1214,18 @@ class SweepEngine:
             "directories": previews,
             "would_delete_files": total_files,
             "would_delete_bytes": total_bytes,
+            "media_directories": media_previews,
+            "media_would_delete_files": sum(
+                item["would_delete_files"] for item in media_previews
+            ),
+            "media_would_delete_bytes": sum(
+                item["would_delete_bytes"] for item in media_previews
+            ),
             "astrbot_size_bytes": astrbot_size,
             "astrbot_threshold_bytes": self.settings()["astrbot_cache_threshold_mb"] * MIB,
+            "astrbot_logs_size_bytes": logs_size,
+            "astrbot_logs_threshold_bytes": self.settings()["astrbot_logs_threshold_mb"] * MIB,
+            "log_retention": retention,
             "astrbot_error": astrbot_error,
             "dir_source": self.active_dirs()[1],
             "modules_pending": sum(

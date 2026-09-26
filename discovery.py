@@ -30,6 +30,11 @@ _ONEBOT_CONFIG_NAMES = ("onebot11.json",)
 _ONEBOT_CONFIG_PREFIX = "onebot11_"
 _CACHE_SUFFIXES = ("temp", "cache", "cache_temp", "temp_cache")
 
+# 测量用的预算独立于搜索：搜索只枚举目录，很便宜；测量会遍历整个文件树，
+# 四个 QQ 实例堆起来轻松吃掉四万条。共用一份预算的话，后面的候选目录会直接
+# 变成「没找到」。
+_MEASURE_BUDGET_ENTRIES = 20000
+
 
 def _is_onebot_config(name: str) -> bool:
     return name.endswith(".json") and (
@@ -313,17 +318,33 @@ def scan_sync(explicit: list[str]) -> dict[str, Any]:
             cache_dirs.append(item)
 
     measured = []
+    # 测量有自己的预算：与搜索共用时，大实例会把后面所有目录挤成「未测量」
+    measure_budget = _Budget(_MEASURE_BUDGET_ENTRIES)
     for item in cache_dirs:
-        if budget.take():
-            row = _measure(item, budget)
-            row["safe"] = _is_safe_to_adopt(item)
-            row["reason"] = "" if row["safe"] else _reject_reason(item)
-            measured.append(row)
+        # 预算耗尽时不能静默把目录吞掉：它会变成「一个都没找到」，
+        # 而面板上只留下「几 KB」，看起来像真的就这么小。宁可标成未测量。
+        if not measure_budget.take():
+            measured.append({
+                "path": str(item),
+                "exists": item.exists(),
+                "file_count": 0,
+                "size_bytes": 0,
+                "skipped_symlinks": 0,
+                "truncated": True,
+                "error": "",
+                "safe": _is_safe_to_adopt(item),
+                "reason": "测量预算已耗尽，该目录未被测量",
+            })
+            continue
+        row = _measure(item, measure_budget)
+        row["safe"] = _is_safe_to_adopt(item)
+        row["reason"] = "" if row["safe"] else _reject_reason(item)
+        measured.append(row)
     return {
         "configs": [_read_onebot_config(path) for path in configs],
         "cache_dirs": measured,
         "searched_roots": searched[:20],
-        "truncated": budget.exhausted,
+        "truncated": budget.exhausted or measure_budget.exhausted,
     }
 
 

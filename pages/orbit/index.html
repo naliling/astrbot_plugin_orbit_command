@@ -7,16 +7,36 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
+  <!-- 开场动画。默认不显示，只有 JS 主动加上 html.intro-on 才亮出来——
+       这样即使脚本没跑起来、或者中途报错，面板也不会被一块黑幕永久挡住。 -->
+  <div class="intro" id="intro" aria-hidden="true">
+    <div class="intro-stars" id="intro-stars"></div>
+    <div class="intro-title" id="intro-title">Orbit Cache</div>
+    <div class="intro-sub" id="intro-sub">娜莉灵</div>
+  </div>
+
   <div class="wrap">
+    <div class="theme-bar">
+      <span class="theme-label">外观</span>
+      <button class="swatch" data-theme-set="deep" style="background:linear-gradient(135deg,#070b14,#38bdf8)" title="深空" aria-label="深空"></button>
+      <button class="swatch" data-theme-set="cyber" style="background:linear-gradient(135deg,#0a0616,#e879f9)" title="赛博" aria-label="赛博"></button>
+      <button class="swatch" data-theme-set="matrix" style="background:linear-gradient(135deg,#030705,#34d399)" title="数据" aria-label="数据"></button>
+      <button class="swatch" data-theme-set="light" style="background:linear-gradient(135deg,#eef2f8,#2563eb)" title="素白" aria-label="素白"></button>
+      <span class="theme-sep"></span>
+      <label class="theme-label" for="theme-accent">主色</label>
+      <input type="color" id="theme-accent" value="#38bdf8" title="自定义主色" />
+      <button id="theme-reset" class="theme-reset" type="button">恢复默认</button>
+    </div>
+
     <header class="head">
       <div>
         <h1>Orbit Cache</h1>
-        <p class="sub">停用插件模块、AstrBot 磁盘缓存、NapCat 协议与文件缓存的自动维护</p>
+        <p class="sub">停用插件模块、AstrBot 磁盘缓存与日志、NapCat 协议与文件缓存的自动维护</p>
       </div>
       <div class="head-actions">
         <button id="btn-refresh" class="btn ghost">刷新</button>
         <button id="btn-dryrun" class="btn ghost">试运行（不删）</button>
-        <button id="btn-sweep" class="btn primary">立即体检</button>
+        <button id="btn-sweep" class="btn primary">按规则立即清理</button>
         <button id="btn-force" class="btn danger">强制全清</button>
       </div>
     </header>
@@ -27,6 +47,14 @@
         <span class="muted">只计算，不删除任何文件</span>
       </div>
       <div id="dryrun-body"></div>
+    </section>
+
+    <section class="card" id="setup-card" style="display:none">
+      <div class="row">
+        <strong>首次设置</strong>
+        <span class="badge warn">还没连上 NapCat</span>
+      </div>
+      <div id="setup-body"></div>
     </section>
 
     <section class="card">
@@ -40,7 +68,7 @@
 
     <section class="card">
       <div class="row">
-        <strong>四层缓存</strong>
+        <strong>缓存层</strong>
         <span class="muted">超过阈值才会自动动手</span>
       </div>
       <div id="layers" class="layers"></div>
@@ -56,6 +84,7 @@
       </div>
       <div id="token-banner" class="banner hidden"></div>
       <div id="inst-state" class="kv"></div>
+      <div id="token-list" class="discover"></div>
       <div id="inst-list" class="inst-list"></div>
       <div class="row actions">
         <button id="btn-save-inst" class="btn primary">保存实例</button>
@@ -64,10 +93,22 @@
         <b>每个 NapCat 实例一行</b>：地址、Token、是否启用、协议缓存清理间隔（小时）。
         多个 Bot 就点「添加实例」加几行，各自独立。
         <br /><br />
-        Token 不用填——插件每次连接前自动解析，NapCat 重启换了也会自动跟上。
+        Token <b>不用填</b>——插件每次连接前自动解析，NapCat 重启换了也会自动跟上。
+        已经配过的那一行显示「留空保持不变」，你碰不到它，也就不会误覆盖。
         如果要连的 NapCat <b>只配了反向连接</b>，它自己不对外监听，
         任何客户端都连不上，必须先在 NapCat「网络配置」里给它加一个 HTTP 或 WebSocket 服务端。
       </p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>死实例检测</strong>
+        <div class="head-actions">
+          <button id="btn-dead" class="btn ghost">检测死实例</button>
+        </div>
+      </div>
+      <div id="dead-note" class="muted note hidden"></div>
+      <div id="dead" class="plugins"></div>
     </section>
 
     <section class="card">
@@ -85,6 +126,10 @@
           <input id="astrbot_cache_threshold_mb" type="number" min="1" />
         </label>
         <label class="field small">
+          <span>AstrBot 日志阈值 (MiB)</span>
+          <input id="astrbot_logs_threshold_mb" type="number" min="1" />
+        </label>
+        <label class="field small">
           <span>NapCat 文件缓存阈值 (MiB)</span>
           <input id="napcat_cache_threshold_mb" type="number" min="1" />
         </label>
@@ -95,6 +140,18 @@
         <label class="field small">
           <span>协议缓存清理间隔 (小时)</span>
           <input id="napcat_protocol_interval_hours" type="number" min="1" />
+        </label>
+        <label class="field small">
+          <span>自选目录阈值 (MiB)</span>
+          <input id="media_threshold_mb" type="number" min="1" />
+        </label>
+        <label class="field small">
+          <span>自选目录最小保留 (天)</span>
+          <input id="media_min_age_days" type="number" min="1" />
+        </label>
+        <label class="field small">
+          <span>日志保留天数 (0 = 旧行为)</span>
+          <input id="log_retention_days" type="number" min="0" />
         </label>
         <div class="field small toggles">
           <label class="check">
@@ -115,6 +172,13 @@
         <span>NapCat 缓存目录（留空 = 自动接管搜索到的目录；手填则优先用手填的）</span>
         <textarea id="napcat_cache_dirs" rows="3" placeholder="留空即可自动接管"></textarea>
       </div>
+      <div class="field">
+        <span>
+          自选媒体目录（留空 = 这一层关着）。填了只删<b>图片/视频/音频</b>且超过最小保留天数的文件，
+          <b>.db、.json、无扩展名一律不碰</b>；用户手填路径，不会自动搜索或接管任何目录。
+        </span>
+        <textarea id="media_dirs" rows="3" placeholder="留空即可关闭这一层；每行一个绝对路径"></textarea>
+      </div>
       <div class="row actions">
         <button id="btn-discover" class="btn ghost">自动探测目录</button>
         <button id="btn-save" class="btn primary">保存</button>
@@ -131,6 +195,27 @@
 
     <section class="card">
       <div class="row">
+        <strong>空间地图</strong>
+        <div class="head-actions">
+          <button id="btn-spaces" class="btn ghost">统计一下</button>
+        </div>
+      </div>
+      <div id="spaces" class="plugins"><div class="empty">只读统计，不删任何东西。点上面按钮开始。</div></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <strong>插件目录里的垃圾</strong>
+        <div class="head-actions">
+          <button id="btn-junk" class="btn ghost">扫一下</button>
+        </div>
+      </div>
+      <div id="junk-note" class="muted note hidden"></div>
+      <div id="junk" class="plugins"><div class="empty">没装完的插件目录、遗留安装包、__pycache__。先列出来，确认后再删。</div></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
         <strong>清理历史</strong>
         <span id="history-count" class="muted"></span>
       </div>
@@ -139,5 +224,19 @@
   </div>
 
   <script type="module" src="./app.js"></script>
+
+  <!-- 页面内对话框。面板跑在 iframe 里，sandbox 通常没有 allow-modals，
+       原生 confirm() 会被静默拦掉并返回 false、alert() 返回 null：
+       后果是「强清」等按钮点了毫无反应，也没有任何提示。 -->
+  <div id="ui-layer" class="ui-layer hidden">
+    <div class="ui-modal" role="dialog" aria-modal="true" aria-labelledby="ui-msg">
+      <div id="ui-msg" class="ui-msg"></div>
+      <div class="ui-actions">
+        <button id="ui-cancel" class="btn">取消</button>
+        <button id="ui-ok" class="btn danger">确定</button>
+      </div>
+    </div>
+  </div>
+  <div id="ui-toast" class="ui-toast hidden"></div>
 </body>
 </html>

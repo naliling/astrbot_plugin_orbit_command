@@ -54,6 +54,48 @@
     "hint": "一般留空即可。不要填 NapCat 实例根目录（里面含 config/ 与程序本体），只填它下面的 temp 或 cache 子目录。",
     "default": []
   },
+  "astrbot_logs_threshold_mb": {
+    "type": "int",
+    "description": "AstrBot 日志阈值 (MiB)",
+    "hint": "超过这个值才清理 AstrBot 自己的日志文件。默认 16 MiB，与磁盘缓存阈值一致。上游对正在写入的日志是清空内容而不是删文件，不会打断 AstrBot。",
+    "default": 16
+  },
+  "media_dirs": {
+    "type": "list",
+    "description": "自选媒体目录（留空 = 不启用）",
+    "hint": "留空即可关着这一层。填了目录后，只会删除其中超过「最小保留天数」且后缀属于图片/视频/音频白名单的文件；.db、.json、无扩展名和任何未知类型一律不碰。",
+    "default": []
+  },
+  "media_threshold_mb": {
+    "type": "int",
+    "description": "自选目录阈值 (MiB)",
+    "hint": "这些目录里媒体文件合计超过这个值才清理，删到 85% 为止。默认 512 MiB。",
+    "default": 512
+  },
+  "media_min_age_days": {
+    "type": "int",
+    "description": "自选目录最小保留天数",
+    "hint": "比这个天数新的文件永远不删。默认 30 天；想更保守就调大。",
+    "default": 30
+  },
+  "ui_theme": {
+    "type": "string",
+    "description": "面板配色",
+    "hint": "deep 深空 / cyber 赛博 / matrix 数据 / light 素白。留空则跟随 WebUI 的深浅色。",
+    "default": ""
+  },
+  "ui_accent": {
+    "type": "string",
+    "description": "面板主色",
+    "hint": "形如 #38bdf8。留空则用各套配色自带的主色。存的是插件配置，换浏览器也在。",
+    "default": ""
+  },
+  "log_retention_days": {
+    "type": "int",
+    "description": "日志保留天数（0 = 旧行为）",
+    "hint": "填 0 时沿用「超阈值就清」；一旦填大于 0，就只删超过这么多天的轮转日志，当前正在写的 astrbot.log 永不删。推荐 7。",
+    "default": 0
+  },
   "napcat_cache_threshold_mb": {
     "type": "int",
     "description": "NapCat 文件缓存阈值 (MiB)",

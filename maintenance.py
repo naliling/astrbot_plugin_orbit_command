@@ -24,6 +24,15 @@ def _is_protected(name: str) -> bool:
     return name in _PROTECTED_NAMES or name.startswith("onebot11_")
 
 
+# 只删这些后缀。.db / .json / 无扩展名 / 任何未知类型一律不碰——
+# 宁可少删，也不能在用户手填的目录里猜错文件类型。
+_MEDIA_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v", ".3gp",
+    ".mp3", ".m4a", ".wav", ".ogg", ".amr", ".silk", ".voice",
+})
+
+
 class ModuleCacheError(RuntimeError):
     pass
 
@@ -181,10 +190,18 @@ class NapCatCacheDirectoryCleaner:
         threshold_mb: int = 100,
         min_age_minutes: int = 10,
         target_ratio: float = 0.85,
+        extensions: frozenset[str] | None = None,
     ) -> None:
         self.threshold_bytes = int(threshold_mb) * 1024 * 1024
         self.min_age_seconds = int(min_age_minutes) * 60
         self.target_ratio = float(target_ratio)
+        # None = 目录内文件全算（原来的整目录缓存语义）；
+        # 给定集合时只算后缀命中的，其余文件既不计入体积也不会被删。
+        self.extensions = (
+            frozenset(str(item).lower() for item in extensions)
+            if extensions
+            else None
+        )
         if self.threshold_bytes <= 0:
             raise ValueError("缓存阈值必须大于 0")
         if self.min_age_seconds < 0:
@@ -228,8 +245,12 @@ class NapCatCacheDirectoryCleaner:
                 result.append(resolved)
         return result
 
-    @staticmethod
-    def _walk(root: Path) -> tuple[list[tuple[Path, int, float]], int]:
+    def _counts(self, path: Path) -> bool:
+        if self.extensions is None:
+            return True
+        return path.suffix.lower() in self.extensions
+
+    def _walk(self, root: Path) -> tuple[list[tuple[Path, int, float]], int]:
         files: list[tuple[Path, int, float]] = []
         skipped = 0
         if not root.exists():
@@ -243,6 +264,9 @@ class NapCatCacheDirectoryCleaner:
                     continue
                 if _is_protected(path.name):
                     skipped += 1
+                    continue
+                if not self._counts(path):
+                    # 不计入体积也不删除，所以不占用「跳过符号链接」的计数
                     continue
                 stat = path.stat()
                 files.append((path, stat.st_size, stat.st_mtime))
@@ -364,6 +388,15 @@ class NapCatCacheDirectoryCleaner:
 
 
 class AstrBotCacheCleaner:
+    """包装 AstrBot 自带的 StorageCleaner，只做 target 参数化。
+
+    上游 get_status() 同时返回 logs 与 cache 两块，cleanup() 接受 logs/cache/all。
+    这里只暴露 logs 与 cache：两层的阈值是分开判定的，给了 "all" 会把没超阈值的那层也清掉。
+    """
+
+    LOGS = "logs"
+    CACHE = "cache"
+
     def _cleaner(self) -> Any:
         from astrbot.core.utils.storage_cleaner import StorageCleaner
 
@@ -372,13 +405,20 @@ class AstrBotCacheCleaner:
     async def status(self) -> dict[str, Any]:
         return await asyncio.to_thread(self._cleaner().get_status)
 
-    async def size_bytes(self) -> int:
+    async def target_status(self, target: str) -> dict[str, Any]:
         status = await self.status()
-        cache = status.get("cache", {}) if isinstance(status, dict) else {}
+        value = status.get(target, {}) if isinstance(status, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _int(value: Any) -> int:
         try:
-            return int(cache.get("size_bytes", 0) or 0)
+            return int(value or 0)
         except (TypeError, ValueError):
             return 0
 
-    async def clean(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._cleaner().cleanup, "cache")
+    async def size_bytes(self, target: str = CACHE) -> int:
+        return self._int((await self.target_status(target)).get("size_bytes"))
+
+    async def clean(self, target: str = CACHE) -> dict[str, Any]:
+        return await asyncio.to_thread(self._cleaner().cleanup, target)

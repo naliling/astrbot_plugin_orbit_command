@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from .maintenance import (
     ModuleCacheManager,
 )
 from .napcat import NapCatCacheClient, NapCatEndpoint
+from .spaces import plugin_junk, remove_junk, usage_map
 from .scheduler import LAYERS, SweepEngine
 from .transport import validate_base_url
 
@@ -43,7 +45,7 @@ JOB_NAME = "orbit-sweep"
 DEPRECATION_HINT = "本插件已改为自动模式，建议改用 /orbit 或 WebUI 面板。"
 
 _HELP = (
-    "/orbit 看四层缓存与调度状态\n"
+    "/orbit 看各清理层与调度状态\n"
     "/orbit clean 立即强制清理全部\n"
     "/orbit on 开启自动 / off 暂停自动\n"
     "/orbit purge <插件ID> 立即清某个插件的内存模块"
@@ -55,6 +57,32 @@ def admin_command(name: str, **kwargs: Any):
         return filter.permission_type(filter.PermissionType.ADMIN)(registered)
 
     return decorate
+
+
+def _friendly_error(what: str, exc: BaseException) -> str:
+    """把技术异常换成人能看懂的话，技术名另起一行。
+
+    面板上直接甩一个 `TimeoutError` 等于什么都没说：用户既不知道
+    该重试、该改路径，还是该找管理员。
+
+    只返回一条字符串，不依赖 error_response 是否支持额外 kwargs——
+    框架那个函数的 message 是必填位置参数，传 **extra 会直接 TypeError。
+    """
+    name = type(exc).__name__
+    if isinstance(exc, TimeoutError):
+        hint = (f"{what}超时了。目录可能太大或所在的盘没响应，建议先重试一次；"
+                "反复超时就把范围缩小，或在设置里少填几个目录。")
+    elif isinstance(exc, PermissionError):
+        hint = (f"{what}没有权限读取。通常是目录归另一个用户所有，"
+                "请确认运行 AstrBot 的账号能读它。")
+    elif isinstance(exc, FileNotFoundError):
+        hint = f"{what}时发现路径已不存在，可能是目录被删了或挂载掉了。"
+    elif isinstance(exc, OSError):
+        hint = (f"{what}失败，可能是路径不可达或磁盘有错误。"
+                "路径就填在下面的输入框里，可以先确认它还在。")
+    else:
+        hint = f"{what}失败。"
+    return f"{hint}\n详细信息：{name}: {exc}"
 
 
 class OrbitCachePlugin(Star):
@@ -299,7 +327,7 @@ class OrbitCachePlugin(Star):
 
     def _register_web_api(self) -> None:
         reg = self.context.register_web_api
-        reg(f"/{PLUGIN_ID}/overview", self.api_overview, ["GET"], "四层缓存与调度总览")
+        reg(f"/{PLUGIN_ID}/overview", self.api_overview, ["GET"], "各清理层与调度总览")
         reg(f"/{PLUGIN_ID}/plugins", self.api_plugins, ["GET"], "插件模块占用")
         reg(f"/{PLUGIN_ID}/history", self.api_history, ["GET"], "清理历史")
         reg(f"/{PLUGIN_ID}/discover", self.api_discover, ["GET"], "自动探测 NapCat 缓存目录")
@@ -309,12 +337,128 @@ class OrbitCachePlugin(Star):
         reg(f"/{PLUGIN_ID}/sweep", self.api_sweep, ["POST"], "立即体检或强制清理")
         reg(f"/{PLUGIN_ID}/settings", self.api_settings, ["POST"], "保存可调项")
         reg(f"/{PLUGIN_ID}/purge", self.api_purge, ["POST"], "立即清某个插件的模块")
+        reg(f"/{PLUGIN_ID}/dead-instances", self.api_dead_instances, ["GET"], "检测死实例")
+        reg(
+            f"/{PLUGIN_ID}/instance", self.api_remove_instance, ["POST"], "从配置里删掉一个实例"
+        )
+        reg(f"/{PLUGIN_ID}/spaces", self.api_spaces, ["GET"], "空间地图（只读）")
+        reg(f"/{PLUGIN_ID}/junk", self.api_junk, ["GET"], "插件目录里的客观垃圾")
+        reg(f"/{PLUGIN_ID}/junk", self.api_junk_remove, ["POST"], "删除一项客观垃圾")
+
+    async def api_spaces(self):
+        """只读：回答「空间到底被谁吃了」。
+
+        单独一个接口而不是塞进 overview：这里要真的遍历目录树，
+        不能跟着面板的 30 秒轮询跑。
+        """
+        try:
+            payload = await usage_map(
+                media_dirs=self.engine.settings()["media_dirs"],
+                cache_dirs=[*self.engine.settings()["media_dirs"],
+                            *self.engine.active_dirs()[0]],
+            )
+        except Exception as exc:
+            return error_response(_friendly_error("统计空间", exc), status_code=500)
+        payload["note"] = "只读统计，不删任何东西。"
+        return json_response(payload)
+
+    async def api_junk(self):
+        try:
+            payload = await plugin_junk()
+        except Exception as exc:
+            return error_response(_friendly_error("扫描插件目录", exc), status_code=500)
+        payload["note"] = (
+            "只列不需要推断的垃圾：没装完的插件目录、遗留安装包、__pycache__。"
+            "不判断「装了但没加载」——停用、没加载、残留三者分不清，"
+            "猜错就是删掉在跑的插件。"
+        )
+        return json_response(payload)
+
+    async def api_junk_remove(self):
+        payload = await request.json(default={})
+        kind = str(payload.get("kind") or "").strip()
+        target = str(payload.get("path") or "").strip()
+        if kind not in ("broken", "zip", "pycache"):
+            return error_response("未知的垃圾类型", status_code=400)
+        if not target:
+            return error_response("缺少 path", status_code=400)
+        result = await remove_junk(kind, target)
+        if not result.get("ok"):
+            return error_response(str(result.get("error") or "删除失败"), status_code=400)
+        return json_response(result)
+
+    async def api_dead_instances(self):
+        """单独一个接口而不是塞进 overview：面板每 30 秒刷一次，
+        这里的探测要真的连 NapCat，不能跟着轮询跑。"""
+        try:
+            findings = await self.engine.dead_instances()
+        except Exception as exc:
+            return error_response(_friendly_error("检测死实例", exc), status_code=500)
+        return json_response({
+            "rows": findings,
+            "checked": len(self.napcat.endpoints),
+            "note": (
+                "删除只会移除配置里的这一行，不会动 NapCat 磁盘上的任何数据；"
+                "删错了加回来就行。连接不上的不提供删除。"
+            ),
+        })
+
+    async def api_remove_instance(self):
+        """只删配置里的一行。可逆，且不碰任何磁盘数据。"""
+        payload = await request.json(default={})
+        url = str(payload.get("url") or "").strip().rstrip("/")
+        if not url:
+            return error_response("缺少 url", status_code=400)
+        try:
+            occurrence = int(payload.get("occurrence") or 0)
+        except (TypeError, ValueError):
+            return error_response("occurrence 必须是整数", status_code=400)
+        if occurrence < 0:
+            return error_response("occurrence 不能为负", status_code=400)
+        raw = self.config.get("onebot_instances", [])
+        if not isinstance(raw, list) or not raw:
+            return error_response(
+                "当前用的是旧版单实例配置，请在面板里直接改地址", status_code=400
+            )
+        # 最后一个实例不许删：删了机器人就直接哑了。想停用一个实例有 enable 开关，
+        # 不必用删除这种不可逆感更强的手段。
+        if len([i for i in raw if isinstance(i, dict)]) <= 1:
+            return error_response(
+                "这是最后一个实例，删掉机器人就没法连 NapCat 了。"
+                "只想停用请把它的「启用」关掉。",
+                status_code=400,
+            )
+        # 直接拿原始条目比，不能用 _instance_rows() 的下标：那函数会跳过空 url
+        # 的行，下标和 onebot_instances 并不对齐，会删错行。同一地址配了多行时
+        # 只靠地址会删到要保留的那一行，所以还要用 occurrence 指定第几个。
+        kept: list[Any] = []
+        removed = ""
+        matched = 0
+        for item in raw:
+            candidate = (
+                str(item.get("url") or "").strip().rstrip("/")
+                if isinstance(item, dict)
+                else ""
+            )
+            if candidate == url and matched == occurrence:
+                removed = candidate
+                continue
+            if candidate == url:
+                matched += 1
+            kept.append(item)
+        if not removed:
+            return error_response("配置里没有这个实例", status_code=400)
+        self.config["onebot_instances"] = kept
+        self.config.save_config()
+        await self._restart_transport()
+        await self._start_endpoints()
+        return json_response({"ok": True, "removed": removed, "remaining": len(kept)})
 
     async def api_overview(self):
         try:
             overview = await self.engine.collect()
         except Exception as exc:
-            return error_response(f"读取总览失败：{type(exc).__name__}", status_code=500)
+            return error_response(_friendly_error("读取总览", exc), status_code=500)
         return json_response(
             {
                 **overview,
@@ -322,8 +466,10 @@ class OrbitCachePlugin(Star):
                 "connection": {
                     "auth": self.auth_state,
                     "instances": [
-                        {**row, "token": "***" if row["token"] else "",
-                         "token_set": bool(row["token"])}
+                        # 只告诉前端「有没有配」，不把 token（连 *** 这种占位符也
+                        # 不要）送到浏览器。否则输入框里会出现 *** ，用户只改
+                        # 别的行再点保存，*** 就会被当成真 token 写回配置。
+                        {**row, "token": "", "token_set": bool(row["token"])}
                         for row in self._instance_rows()
                     ],
                 },
@@ -342,7 +488,7 @@ class OrbitCachePlugin(Star):
         try:
             found = await scan(self._token_dirs())
         except Exception as exc:
-            return error_response(f"探测失败：{type(exc).__name__}", status_code=500)
+            return error_response(_friendly_error("探测 NapCat 配置", exc), status_code=500)
         return json_response(
             {
                 "candidates": found["cache_dirs"],
@@ -392,6 +538,45 @@ class OrbitCachePlugin(Star):
             )
         return "读到了 NapCat 配置，但没找到已启用的对外监听端点，请检查它的网络配置。"
 
+    def _napcat_snippet(self, configs: list[dict[str, Any]]) -> dict[str, str]:
+        """生成一份可以直接粘进 NapCat 的 HTTP 服务端配置。
+
+        首次配置最大的门槛是「得先让 NapCat 对外监听」这一步很反直觉：
+        用户在 NapCat 里配的是反向连接（它主动连出去），而插件这边需要一个
+        能主动连过去的端点。不给一段现成的配置，多数人就在这里卡住。
+        """
+        used: set[int] = set()
+        for entry in configs:
+            for server in entry.get("servers", []):
+                port = server.get("port")
+                if isinstance(port, int):
+                    used.add(port)
+        for row in self._instance_rows():
+            tail = row["url"].rstrip("/").rsplit(":", 1)[-1]
+            if tail.isdigit():
+                used.add(int(tail))
+        port = next((p for p in range(3000, 3010) if p not in used), 3000)
+        address = f"http://127.0.0.1:{port}"
+        document = {
+            "network": {
+                "httpServers": [
+                    {
+                        "name": "Orbit Cache",
+                        "enable": True,
+                        "host": "0.0.0.0",
+                        "port": port,
+                        "token": "",
+                    }
+                ]
+            }
+        }
+        return {
+            "json": json.dumps(document, ensure_ascii=False, indent=2),
+            "port": str(port),
+            "address": address,
+            "where": "NapCat 面板 → 网络配置 → HTTP 服务端 → 添加（同样内容也可直接写进 config/onebot11_*.json）",
+        }
+
     async def api_token_get(self):
         rows = self._instance_rows()
         configs = await onebot_configs(self._token_dirs())
@@ -409,6 +594,7 @@ class OrbitCachePlugin(Star):
                 "instances": states,
                 "auth": self.auth_state,
                 "hint": self._protocol_hint(configs),
+                "snippet": self._napcat_snippet(configs),
                 "configs": redact_configs(configs),
             }
         )
@@ -422,6 +608,9 @@ class OrbitCachePlugin(Star):
             if not isinstance(raw, list):
                 return error_response("instances 必须是数组", status_code=400)
             rows = []
+            # 「留空 = 不动它」：面板从不把真实 token 下发到浏览器，所以保存时
+            # 只能靠 url 找回原来的值。传 *** 也当成留空（老版本遗留）。
+            existing = {r["url"]: r["token"] for r in self._instance_rows()}
             for item in raw:
                 if not isinstance(item, dict):
                     continue
@@ -436,9 +625,12 @@ class OrbitCachePlugin(Star):
                     interval = max(1, int(item.get("protocol_interval_hours") or 12))
                 except (TypeError, ValueError):
                     interval = 12
+                token = str(item.get("token") or "").strip()
+                if not token or token == "***":
+                    token = existing.get(url, "")
                 rows.append({
                     "url": url,
-                    "token": str(item.get("token") or "").strip(),
+                    "token": token,
                     "enable": item.get("enable", True) is not False,
                     "protocol_interval_hours": interval,
                 })
@@ -651,7 +843,7 @@ class OrbitCachePlugin(Star):
 
     @admin_command("orbit")
     async def orbit(self, event: AstrMessageEvent, action: str = "", plugin_id: str = ""):
-        """四层缓存速览。/orbit clean 立即全清，/orbit on|off 开关自动，/orbit purge <插件ID> 清模块。"""
+        """清理层速览。/orbit clean 立即全清，/orbit on|off 开关自动，/orbit purge <插件ID> 清模块。"""
         verb = str(action or "").strip().lower()
         try:
             self._private_only(event)
@@ -696,7 +888,7 @@ class OrbitCachePlugin(Star):
 
     @admin_command("orbit_status")
     async def orbit_status(self, event: AstrMessageEvent):
-        """查看四层缓存状态（已并入 /orbit status）。"""
+        """查看各清理层状态（已并入 /orbit status）。"""
         try:
             self._private_only(event)
             text = await self._overview_text()
@@ -768,7 +960,7 @@ class OrbitCachePlugin(Star):
 
     @admin_command("orbit_clean_all")
     async def orbit_clean_all(self, event: AstrMessageEvent, confirm: str):
-        """强制清理全部四层（已并入 /orbit clean）。"""
+        """强制清理全部层（已并入 /orbit clean）。"""
         result = await self._legacy_clean(event, confirm, None, force=True)
         for item in result:
             yield item
