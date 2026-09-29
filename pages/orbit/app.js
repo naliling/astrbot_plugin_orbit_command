@@ -5,6 +5,8 @@ const state = {
   overview: null,
   instances: [],
   timer: null,
+  refreshing: false,
+  junk: null,
 };
 
 const NUMERIC_SETTINGS = [
@@ -16,7 +18,17 @@ const NUMERIC_SETTINGS = [
   "media_threshold_mb",
   "media_min_age_days",
   "log_retention_days",
+  "unreachable_limit",
 ];
+
+const TOGGLE_SETTINGS = [
+  "auto_enabled",
+  "auto_clean_plugin_modules",
+  "auto_adopt_cache_dirs",
+  "auto_clean_plugin_junk",
+];
+
+const TEXTAREA_SETTINGS = ["napcat_cache_dirs", "media_dirs", "log_dirs"];
 
 // ---------- 表单脏标记 ----------
 
@@ -30,8 +42,7 @@ function formDirty() { return dirty; }
 
 function watchDirty() {
   for (const id of [
-    "sweep_cron", "auto_enabled", "auto_clean_plugin_modules", "auto_adopt_cache_dirs",
-    "napcat_cache_dirs", "media_dirs", ...NUMERIC_SETTINGS,
+    "sweep_cron", ...TOGGLE_SETTINGS, ...TEXTAREA_SETTINGS, ...NUMERIC_SETTINGS,
   ]) {
     const el = $(id);
     if (!el) continue;
@@ -107,8 +118,14 @@ function applyTheme(theme, accent) {
     el.setAttribute("aria-pressed", String(el.dataset.themeSet === name));
   }
   const picker = document.getElementById("theme-accent");
-  // 取色器要显示当前生效的值，不然它一直停在 HTML 里写死的蓝色
-  if (picker) picker.value = accent || "";
+  // 没自定义过时也把当前主题的主色填进去：留空的话 input[type=color] 会显示成黑色，
+  // 用户会以为「主色就是黑的」。
+  if (picker) {
+    const current = accent
+      || (getComputedStyle(document.documentElement).getPropertyValue("--primary") || "").trim()
+      || "#38bdf8";
+    picker.value = current;
+  }
 }
 
 // 跟随宿主的深浅色（用户没手动选过的时候才听它的）
@@ -189,7 +206,30 @@ function bindThemeBar() {
 
 // ---------- 初始化 ----------
 
-(async function init() {
+// 首屏占位。在第一份数据回来之前，每个容器都是一个说人话的待命状态，
+// 而不是九个空盒子——空 div 看着像加载坏了。
+function primePlaceholders() {
+  const hints = {
+    schedule: "正在读取…",
+    layers: "正在读取…",
+    plugins: "正在读取…",
+    history: "正在读取…",
+    dead: "点「检测死实例」开始：只读磁盘与配置，NapCat 挂掉时也查得出重复。",
+    junk: "点「扫一下」开始：没装完的插件目录、遗留安装包、__pycache__。",
+  };
+  for (const [id, text] of Object.entries(hints)) {
+    const el = $(id);
+    if (el) el.innerHTML = `<div class="empty">${escapeHtml(text)}</div>`;
+  }
+}
+
+// 初始化放在文件末尾调用，不是在这里。
+// 原因很实在：下面那堆 const INTRO_* 要到本文件中段才完成初始化，而
+// playIntro() 会在 init() 里**同步**被调用。在声明之前碰到 const 属于 TDZ，
+// 直接抛 ReferenceError——而这个错误发生在任何动画开始之前，后果是
+// 开场动画静默失效（连 class 都来不及加上），面板看起来只是「没动画」。
+// 写成函数声明 + 末尾调用，就彻底绕开了时序问题。
+async function init() {
   try {
     const ctx = await bridge.ready();
     applyHostTheme(Boolean(ctx?.isDark));
@@ -202,14 +242,15 @@ function bindThemeBar() {
   bindThemeBar();
   bindEvents();
   watchDirty();
-  // 外观必须先定下来，否则黑幕会先闪一下浅色
+  primePlaceholders();
+  // 外观必须先定下来，否则幕布会先闪一下浅色
   playIntro();
   await refresh();
   // 页面在后台时不轮询：既省事也避免看不见时静默改数据
   state.timer = setInterval(() => {
     if (document.visibilityState === "visible") refresh();
   }, 30000);
-})();
+}
 
 function bindEvents() {
   $("btn-refresh").onclick = refresh;
@@ -240,8 +281,20 @@ function bindEvents() {
   $("btn-save-inst").onclick = saveInstances;
   $("btn-dryrun").onclick = dryRun;
   $("btn-dead").onclick = checkDead;
+  $("btn-platform").onclick = checkPlatform;
   $("btn-spaces").onclick = showSpaces;
   $("btn-junk").onclick = showJunk;
+  $("btn-junk-all").onclick = purgeAllJunk;
+  $("notice-dead").onclick = checkDead;
+  $("notice-ack").onclick = async () => {
+    try {
+      await bridge.apiPost("attention", { action: "ack" });
+      await refresh();
+      toast("已标记为看过了。", "ok");
+    } catch (e) {
+      toast("标记失败：" + e.message, "bad");
+    }
+  };
   window.addEventListener("beforeunload", () => {
     if (state.timer) clearInterval(state.timer);
   });
@@ -283,17 +336,35 @@ function askConfirm(message) {
 
 // ---------- 开场动画 ----------
 
-// 开场总长约 4.8 秒：入场 1.4s / 副标题 1.1s / 到位后停 1.2s / 退幕 0.9s。
+// 开场总长约 6.5 秒：幕布亮起 0.5s / 标题模糊散开 1.2s / 斜光扫过 1.5s /
+// 副标题 0.8s / 到位后停 1.2s / 退幕 1.1s，外加等首屏数据的那一小段。
 // 节奏刻意比一般开场慢——缓冲给得足，每个阶段都看得清，
 // 退幕也不会卡在副标题刚到位的那一瞬间。
-const INTRO_STEP = 300;        // 标题开始入场
-const INTRO_MAIN = 1400;       // 标题入场时长
-const INTRO_SUB_DELAY = 1600;  // 副标题入场起点（与标题重叠）
-const INTRO_SUB = 600;         // 副标题只做渐变，不足一秒
-const INTRO_HOLD = 1200;       // 全部到位后先停一下再退幕
-const INTRO_EXIT = 900;
-const INTRO_FALLBACK = 5200;   // 兜底：无论发生什么，到点必退幕
+// 数值只有一个出处：style.css 的 :root 变量。CSS 动画和 JS 插值都从那里读，
+// 改一个地方两边一起动，不会出现「CSS 放完了 JS 还在等」的半截状态。
+const INTRO_STEP = introMs("--intro-title-delay", 220);   // 标题开始入场
+const INTRO_MAIN = introMs("--intro-title-in", 1400);      // 标题入场时长
+const INTRO_SUB_DELAY = introMs("--intro-sub-delay", 1100); // 副标题入场起点
+const INTRO_SUB = introMs("--intro-sub-in", 800);          // 副标题只做渐变
+const INTRO_HOLD = 600;        // 全部到位后停一下就退，别吊着
+const INTRO_EXIT = introMs("--intro-exit", 800);
+const INTRO_FALLBACK = 9000;   // 兜底：无论发生什么，到点必退幕
+const INTRO_DATA_WAIT = 2000;  // 数据最多等这么久。再久就先把面板放出来
 const INTRO_STARS = 26;        // 周围的小白点数量
+
+function introMs(name, fallback) {
+  try {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue(name).trim();
+    const value = parseFloat(raw);
+    if (Number.isFinite(value) && value > 0) {
+      return raw.endsWith("ms") ? value : value * 1000;
+    }
+  } catch (e) {
+    /* 读不到就用兜底值 */
+  }
+  return fallback;
+}
 
 const easeOutExpo = (t) => (t === 1 ? 1 : 1 - Math.pow(2, -10 * t));
 const easeBack = (t) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2);
@@ -310,6 +381,9 @@ function interpolate(el, from, to, duration, ease, delay, fadeOnly) {
   return new Promise((resolve) => {
     setTimeout(() => {
       const start = performance.now();
+      // 两端模糊相同时整段不写 filter。高斯模糊不是合成属性，每帧重算一次
+      // 等于把这段文字反复重绘，掉帧全出在这里。
+      const hasBlur = from.b !== to.b;
       function frame(now) {
         let t = Math.min((now - start) / duration, 1);
         t = ease(t);
@@ -317,9 +391,11 @@ function interpolate(el, from, to, duration, ease, delay, fadeOnly) {
         // fadeOnly：只改不透明度。副标题要的就是「直接渐变、完全不位移」，
         // 连模糊都不留。
         if (!fadeOnly) {
-          el.style.filter = `blur(${from.b + (to.b - from.b) * t}px)`;
+          if (hasBlur) {
+            el.style.filter = `blur(${from.b + (to.b - from.b) * t}px)`;
+          }
           el.style.transform =
-            `translate(-50%, ${from.y + (to.y - from.y) * t}px) ` +
+            `translateY(${from.y + (to.y - from.y) * t}px) ` +
             `scale(${from.s + (to.s - from.s) * t})`;
         }
         if (t < 1) {
@@ -345,13 +421,22 @@ function interpolate(el, from, to, duration, ease, delay, fadeOnly) {
 function finishIntro(stage) {
   if (!stage || stage.dataset.done === "1") return;
   stage.dataset.done = "1";
-  stage.style.transition = `opacity ${INTRO_EXIT}ms ease, transform ${INTRO_EXIT}ms ease`;
-  stage.style.opacity = "0";
-  stage.style.transform = "scale(1.06)";
+  const root = document.documentElement;
+  // 先在幕还全黑的时候把卡片的毛玻璃图层准备好（intro-prep 关掉了它们）。
+  // 否则 blur(12px) 会在淡出的同一帧才第一次合成，平板上那一下就是
+  // 「卡一卡才缓过来」。等两帧确保图层建完，再开始退。
+  root.classList.add("intro-prep");
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    root.classList.add("intro-out");
+  }));
   setTimeout(() => {
-    document.documentElement.classList.remove("intro-on");
-    stage.style.transition = "";
-    stage.style.transform = "";
+    // 留一个永久隐藏的 class，别把 intro-on / intro-out 摘干净：
+    // .intro 的默认样式是「不透明可见」（为了第一帧不闪），摘干净它就回来了。
+    root.classList.add("intro-done");
+    root.classList.remove("intro-on");
+    root.classList.remove("intro-prep");
+    root.classList.remove("intro-out");
+    stage.dataset.done = "";
   }, INTRO_EXIT);
 }
 
@@ -381,18 +466,45 @@ function makeStars(host, count) {
   host.innerHTML = parts.join("");
 }
 
+// 首屏数据有没有到。没到就不许退幕：否则退出去的是九个空盒子，
+// 观感正好是「动画放完了页面还是空的，然后突然糊一堆东西出来」。
+let introDataReady = false;
+const introWaiters = [];
+
+function markIntroDataReady() {
+  introDataReady = true;
+  const wait = $("intro-wait");
+  if (wait) wait.style.opacity = "0";
+  while (introWaiters.length) introWaiters.pop()();
+}
+
+function waitIntroData() {
+  if (introDataReady) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, INTRO_DATA_WAIT);
+    introWaiters.push(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
 function playIntro() {
   const stage = $("intro");
   const title = $("intro-title");
   const sub = $("intro-sub");
   const stars = $("intro-stars");
   if (!stage || !title || !sub) return;
+  const root = document.documentElement;
 
-  // 开了「减少动效」就直接终态，不放动画
-  if (prefersReducedMotion()) return;
+  // 开了「减少动效」就**立刻把幕布撤掉**，不是「什么都不做」。
+  // 幕布现在默认是可见不透明的（为了第一帧不闪），直接 return 会让它
+  // 一直挡在 z-index:200 的位置——用户看到的是一块点不动的黑屏，
+  // 要等 9 秒的 CSS 兜底才放行。
+  if (prefersReducedMotion()) {
+    root.classList.add("intro-done");
+    return;
+  }
 
   if (stars) makeStars(stars, INTRO_STARS);
-  document.documentElement.classList.add("intro-on");
+  root.classList.add("intro-on");
   // 兜底：万一 rAF 被挂起、或中间抛错，到点必退幕，不能把面板永久挡住
   const bail = setTimeout(() => finishIntro(stage), INTRO_FALLBACK);
   // 不耐烦的人随手点一下/敲一下就跳过
@@ -410,8 +522,10 @@ function playIntro() {
       // 两个动画同时起跑，各自算自己的绝对延迟。
       // 不要写成「等标题跑完再开始副标题」——那样副标题的延迟就成了负数，
       // setTimeout 会当成 0，重叠点也就没了。
+      // 标题只插值位移与缩放：模糊由下面那层 .intro-ghost 静态承担，
+      // 两层一淡一显，看起来就是「从模糊里显出来」，但没有一帧在重算模糊。
       const titleDone = interpolate(
-        title, { o: 0, b: 16, s: 1.12, y: 0 }, { o: 1, b: 0, s: 1, y: 0 },
+        title, { o: 0, b: 0, s: 1.08, y: 10 }, { o: 1, b: 0, s: 1, y: 0 },
         INTRO_MAIN, easeOutExpo, INTRO_STEP,
       );
       const subDone = interpolate(
@@ -429,6 +543,7 @@ function playIntro() {
     clearTimeout(bail);
     document.removeEventListener("keydown", skip);
     stage.removeEventListener("click", skip);
+    await waitIntroData();
     finishIntro(stage);
   })();
 }
@@ -494,23 +609,74 @@ function renderSetup(res) {
 
 // ---------- 数据 ----------
 
+// 一块渲染失败就把后面全块留在「正在读取」，而失败信息又只写进两个容器里，
+// 用户完全看不到——结果就是「一直读取」加上「不知道为什么」。
+// 所以每块单独 try，失败当场报出来。
+function renderEach(jobs) {
+  const failed = [];
+  for (const [name, run] of jobs) {
+    try {
+      run();
+    } catch (e) {
+      failed.push(`${name}：${(e && e.message) || e}`);
+      console.error("渲染失败 " + name, e);
+    }
+  }
+  return failed;
+}
+
+// 失败要显现在**最上面**，而不是藏在哪张卡的角落。
+function showProblem(title, detail) {
+  const badge = $("auto-badge");
+  if (badge) {
+    badge.textContent = title;
+    badge.className = "badge bad";
+  }
+  const host = $("notice");
+  if (!host) return;
+  host.hidden = false;
+  host.className = "notice bad";
+  // **只能填内容，不能整块重写**。这里原来用 innerHTML 重建整条，
+  // 把预置的 id="notice-title" / id="notice-items" 一起冲掉了；
+  // 于是下一轮 renderAttention 拿到 null、每 30 秒报一次
+  // "Cannot set properties of null"——而且再也恢复不了，
+  // 一次报错就把自己永久拆了。
+  const titleEl = $("notice-title");
+  const box = $("notice-items");
+  if (titleEl) titleEl.textContent = title;
+  if (box) {
+    box.innerHTML = `<div class="notice-item bad"><span class="dot"></span>
+      <span class="n-body">${escapeHtml(String(detail || "").slice(0, 400))}</span></div>`;
+  }
+}
+
 async function refresh() {
+  // 轮询与手动刷新会撞在一起。overview 慢的时候（目录遍历 + 逐实例探测）
+  // 两个请求会同时在飞，后到的旧响应把新数据盖掉。现在的做法是同一时刻
+  // 只允许一个在跑，并给刷新按钮一个可见的转圈指示。
+  if (state.refreshing) return;
+  state.refreshing = true;
+  const btn = $("btn-refresh");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> 刷新中';
+  }
   try {
-    const [overview, history] = await Promise.all([
+    // 两个请求各自成败：history 挂了不该把 overview 一起拖下水。
+    // 用 Promise.all 的话，只要历史那一条出错，已经拿到的总览也会被丢掉。
+    const [ovRes, hiRes] = await Promise.allSettled([
       bridge.apiGet("overview"),
       bridge.apiGet("history", { limit: 40 }),
     ]);
+    if (ovRes.status === "rejected") throw ovRes.reason;
+    const overview = ovRes.value;
+    const history = hiRes.status === "fulfilled" ? hiRes.value : { history: [] };
     state.overview = overview;
-    renderSchedule(overview);
-    renderLayers(overview);
-    renderPlugins(overview.module_rows || []);
-    renderHistory(history.history || []);
-    fillSettings(overview.settings || {});
-    // 外观也从服务端配置回读：刷新页面后依旧是你上次选的那套。
-    // 这条路不通的话，存进去了也读不回来。
+    // 外观与实例列表的输入都要先算出来，但每一块渲染都单独隔离。
+    // 注意顺序：renderInstanceStatus 先把状态写进 state.statusByUrl，
+    // renderInstances 再去每行读它，反过来这一轮就没有徽标。
     const look = lookFrom(overview.settings);
     applyTheme(look.theme, look.accent);
-    // 表单脏了就别拿服务端数据冲刷——用户正改到一半的地址/阈值会被吹掉
     if (!formDirty()) {
       state.instances = (overview.connection?.instances || []).map((r) => ({
         url: r.url, token: r.token || "", enable: r.enable,
@@ -523,14 +689,86 @@ async function refresh() {
                            protocol_interval_hours: 12 }];
     }
     state.instancesLoaded = true;
-    renderInstances();
-    renderInstStatus(overview.napcat?.instances || []);
-    renderLastError(overview.last_error || "");
+    const failed = renderEach([
+      ["调度状态", () => renderSchedule(overview)],
+      ["缓存层", () => renderLayers(overview)],
+      ["插件模块", () => renderPlugins(overview.module_rows || [])],
+      ["清理历史", () => renderHistory(history.history || [])],
+      ["待办", () => renderAttention(overview.attention)],
+      ["实例状态", () => renderInstanceStatus(overview.instance_status || [])],
+      ["实例列表", () => renderInstances()],
+      ["实例连接", () => renderInstStatus(overview.napcat?.instances || [])],
+      ["最近错误", () => renderLastError(overview.last_error || "")],
+      ["设置", () => fillSettings(overview.settings || {})],
+    ]);
+    if (failed.length) showProblem(`有 ${failed.length} 块没渲染出来`, failed.join("；"));
+    if (hiRes.status === "rejected") {
+      const box = $("history");
+      if (box) box.innerHTML = '<div class="empty">清理历史没读到</div>';
+    }
   } catch (e) {
-    $("auto-badge").textContent = "读取失败";
-    $("auto-badge").className = "badge bad";
-    $("schedule").innerHTML = `<span class="bad">${escapeHtml(e.message)}</span>`;
+    // 请求本身就失败了：每个容器都换成能看懂的提示，
+    // 而不是留一句「正在读取」让人对着它干等
+    showProblem("读取失败", (e && e.message) || e);
+    for (const id of ["schedule", "layers", "plugins", "history"]) {
+      const el = $(id);
+      if (el) el.innerHTML = '<div class="empty">没能读到数据，点右上角「刷新」重试</div>';
+    }
+  } finally {
+    // 不管成不成都放行退幕：请求卡住时开场会一直盖着，看起来就像死机
+    markIntroDataReady();
+    state.refreshing = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "刷新";
+    }
   }
+}
+
+// 清完之后把**逐层结果**摊开。只弹一句「已清理 N 层」等于什么都没说：
+// 用户真正想知道的是「动了哪些、释放多少、哪些没动、为什么没动」。
+function renderSweepResult(res) {
+  const card = $("sweep-card");
+  const records = (res && res.records) || [];
+  $("sweep-card").style.display = "";
+  if (!records.length) {
+    $("sweep-summary").textContent = "";
+    $("sweep-body").innerHTML = '<div class="empty">没有可执行的层</div>';
+    return;
+  }
+  const freed = Number(res.freed_bytes) || 0;
+  const acted = records.filter((r) => r.acted);
+  const failed = records.filter((r) => r.error);
+  const quiet = records.filter((r) => !r.acted && !r.error);
+  const parts = [`动了 ${acted.length} 层`];
+  if (freed) parts.push(`共释放 ${humanBytes(freed)}`);
+  if (failed.length) parts.push(`${failed.length} 层失败`);
+  if (quiet.length) parts.push(`${quiet.length} 层没动`);
+  if (res.disk_freed !== null && res.disk_freed !== undefined) {
+    const delta = Number(res.disk_freed);
+    parts.push(
+      delta >= 0
+        ? `磁盘实际多了 ${humanBytes(delta)}`
+        : `磁盘实际少了 ${humanBytes(-delta)}`
+    );
+  }
+  $("sweep-summary").textContent = parts.join(" · ");
+  const line = (r) => {
+    const tag = r.error ? "失败" : r.acted ? "已清理" : "没动";
+    const cls = r.error ? "find-why bad" : r.acted ? "find-why" : "find-why";
+    const detail = r.error || r.detail || r.skipped || "";
+    const size = r.freed_bytes ? ` · 释放 ${humanBytes(r.freed_bytes)}` : "";
+    return `<div class="find">
+      <div class="find-top">
+        <span class="find-url">${escapeHtml(r.label || r.layer)}</span>
+        <span class="badge ${r.error ? "bad" : r.acted ? "ok" : "off"}">${tag}</span>
+        <span class="n">${humanBytes(Number(r.current) || 0)}${size}</span>
+      </div>
+      ${detail ? `<div class="${cls}">${escapeHtml(detail)}</div>` : ""}
+    </div>`;
+  };
+  const order = (r) => (r.error ? 0 : r.acted ? 1 : 2);
+  $("sweep-body").innerHTML = [...records].sort((a, b) => order(a) - order(b)).map(line).join("");
 }
 
 async function runSweep(force, layers) {
@@ -538,28 +776,13 @@ async function runSweep(force, layers) {
   $("btn-force").disabled = true;
   try {
     const res = await bridge.apiPost("sweep", { force, layers: layers || null });
-    const freed = res.freed_bytes || 0;
-    const acted = (res.acted || []).length;
-    const errs = (res.records || []).filter((r) => r.error).length;
-    if (errs) {
-      toast(`完成，但有 ${errs} 层失败，详见下方历史。`, "bad");
-    } else if (!freed) {
-      // 0 字节是常态：干净的时候强制清理本来就无事可做。
-      // 之前这里报「N 层执行了清理，释放 0 B」，看着就像按钮没反应。
-      toast(
-        "跑完了，但一个字节都没释放——这些位置本来就已经是干净的。\n" +
-        "占用超过阈值时，定时体检会自己动手。",
-        "warn",
-      );
-    } else {
-      toast(`完成：${acted} 层清理了内容，释放 ${humanBytes(freed)}。`, "ok");
-    }
+    renderEach([["清理结果", () => renderSweepResult(res)]]);
+    await refresh();
   } catch (e) {
-    toast("清理失败：" + e.message, "bad");
+    showProblem("清理失败", (e && e.message) || e);
   } finally {
     $("btn-sweep").disabled = false;
     $("btn-force").disabled = false;
-    await refresh();
   }
 }
 
@@ -571,20 +794,13 @@ async function forceLayer(layer) {
 
 async function saveSettings() {
   clearDirty();
-  const payload = {
-    sweep_cron: $("sweep_cron").value.trim(),
-    auto_enabled: $("auto_enabled").checked,
-    auto_clean_plugin_modules: $("auto_clean_plugin_modules").checked,
-    auto_adopt_cache_dirs: $("auto_adopt_cache_dirs").checked,
-    napcat_cache_dirs: $("napcat_cache_dirs")
-      .value.split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean),
-    media_dirs: $("media_dirs")
-      .value.split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  };
+  const payload = { sweep_cron: $("sweep_cron").value.trim() };
+  for (const key of TOGGLE_SETTINGS) {
+    payload[key] = $(key).checked;
+  }
+  for (const key of TEXTAREA_SETTINGS) {
+    payload[key] = $(key).value.split("\n").map((s) => s.trim()).filter(Boolean);
+  }
   for (const key of NUMERIC_SETTINGS) {
     payload[key] = Number($(key).value);
   }
@@ -627,7 +843,101 @@ async function purge(pluginId) {
   }
 }
 
-// ---------- 渲染 ----------
+// ---------- 需要处理的事 ----------
+
+// 本插件不推送，所有提醒都聚到首屏这一条里。所以它必须比任何卡片都醒目：
+// 吸顶、带级别色、逐条列出，并标出哪几条是上次打开之后新出现的。
+// 只填内容不重建结构：这条每 30 秒刷一次，重建会把按钮的 hover 状态一起换掉。
+function renderAttention(att) {
+  const host = $("notice");
+  const items = (att && att.items) || [];
+  if (!items.length) {
+    host.hidden = true;
+    $("notice-items").innerHTML = "";
+    return;
+  }
+  const unread = Number(att.unread) || 0;
+  host.hidden = false;
+  host.className = "notice " + (att.level || "warn");
+  $("notice-title").textContent = items.length + " 件事需要处理" +
+    (unread ? ` · ${unread} 条是你上次关闭面板之后出现的` : "");
+  $("notice-items").innerHTML = items.map((it) => `
+    <div class="notice-item ${escapeHtml(it.level || "info")}">
+      <span class="dot"></span>
+      <span class="n-body"><b>${escapeHtml(it.title)}</b>${escapeHtml(it.detail || "")}
+        ${it.action && it.action.type === "remove_instance"
+          ? `<button class="btn mini" data-att-url="${escapeHtml(it.action.url || "")}">删掉这一行</button>`
+          : ""}
+      </span>
+      ${it.at ? `<span class="n-time">${escapeHtml(shortTime(it.at))}</span>` : ""}
+    </div>`).join("");
+  for (const el of $("notice-items").querySelectorAll("[data-att-url]")) {
+    el.onclick = () => dropInstance(el.dataset.attUrl, 0);
+  }
+}
+
+// ---------- 实例状态表 ----------
+
+// 之前面板只能告诉你「这次探测没连上」。看不出一个挂着的是「你自己停用的」
+// 还是「重复配的一个」还是「真的挂了」——而这三种要采取的动作完全不同。
+const INSTANCE_STATE = {
+  running: ["ok", "运行中"],
+  disabled: ["off", "已停用"],
+  refused: ["bad", "服务没启动"],
+  timeout: ["warn", "服务无响应"],
+  dns: ["bad", "主机名解析失败"],
+  auth: ["warn", "Token 无效"],
+  dead: ["warn", "疑似失联"],
+  unknown: ["off", "尚未探测"],
+};
+
+// 实例状态表。地址在下面「改完点保存」的表单里已经出现一次，
+// 这里再列一遍就成了同一屏里两排一模一样的字——所以这张表只给状态，
+// 并把每条状态**钉回它对应的那一行**。
+function renderInstanceStatus(rows) {
+  const host = $("inst-table");
+  state.statusByUrl = {};
+  if (!rows || !rows.length) {
+    host.innerHTML = "";
+    return;
+  }
+  for (const row of rows) {
+    const [cls, label] = INSTANCE_STATE[row.state] || INSTANCE_STATE.unknown;
+    state.statusByUrl[row.url] = {
+      cls, label, note: row.note, duplicate: row.duplicate_with,
+    };
+  }
+  const worthTelling = rows.filter(
+    (r) => r.duplicate_with || (r.note && r.state !== "running")
+  );
+  host.innerHTML = worthTelling.length
+    ? `<div class="inst-alert">${worthTelling
+        .map((r) => {
+          const [cls] = INSTANCE_STATE[r.state] || INSTANCE_STATE.unknown;
+          const text = r.duplicate_with
+            ? `与 ${r.duplicate_with} 指向同一个 QQ 号`
+            : r.note;
+          return `<div class="notice-item ${r.duplicate_with ? "bad" : cls === "ok" ? "info" : cls}">
+            <span class="dot"></span><span class="n-body">${escapeHtml(r.url)} — ${escapeHtml(text)}</span>
+          </div>`;
+        })
+        .join("")}</div>`
+    : "";
+}
+
+// 记录文件在哪、有没有接上次的——「累计释放突然清零」这种事，
+// 光看数字分不清是记录丢了还是真的没清过。写出来让人自己判断。
+function renderDiagnostics(d) {
+  if (!d) return "";
+  const bits = [];
+  bits.push(d.state_exists
+    ? (d.restored ? "已接上次的记录" : "记录是空的（还没跑过体检）")
+    : "记录文件还没建");
+  if (d.history_records) bits.push(`历史 ${d.history_records} 条`);
+  return `<div class="kv kv-dim"><span title="${escapeHtml(d.state_path || "")}">
+    <b>记录存于：</b>${escapeHtml(d.state_path || "未知")} · ${escapeHtml(bits.join(" · "))}
+  </span></div>`;
+}
 
 function renderSchedule(overview) {
   const s = overview.schedule || {};
@@ -641,55 +951,140 @@ function renderSchedule(overview) {
   badge.innerHTML = on
     ? `<span class="pulse"></span>${escapeHtml(badge.textContent)}`
     : escapeHtml(badge.textContent);
-  $("schedule").innerHTML = [
-    ["NapCat", `${escapeHtml(napcat.endpoint || "未知")} ` +
-      `<i class="${napcat.connected ? "ok" : "bad"}">${napcat.connected ? "连接正常" : escapeHtml(napcat.error || "连接异常")}</i>`],
-    ["体检频率", escapeHtml(s.cron_effective || "未注册")],
-    ["下次体检", escapeHtml(s.next_run || "未注册")],
-    ["上次体检", escapeHtml(t.last_sweep_at || "从未")],
-    ["上次释放", humanBytes(t.last_freed_bytes || 0)],
-    ["累计释放", humanBytes(t.total_freed_bytes || 0)],
-    ["累计体检次数", String(t.sweep_count || 0)],
-  ]
-    .map(([k, v]) => `<span><b>${k}：</b>${v}</span>`)
-    .join("");
+  // 数字分三级：可回收总量是这个面板存在的理由，给它最大的字号；
+  // 累计与上次是参考；频率与时间是背景，灰、小、不抢视线。
+  const reclaim = humanBytes(t.reclaimable_bytes || 0);
+  $("schedule").innerHTML = `
+    <div class="hero">
+      <div class="hero-label">当前可回收</div>
+      <div class="hero-value">${escapeHtml(reclaim)}</div>
+      <div class="hero-sub">${escapeHtml(t.reclaimable_modules || 0)} 个模块 · 来自 ${Object.keys(overview.layers || {}).length} 个维护层</div>
+    </div>
+    <div class="kv">
+      <span><b>累计释放：</b>${escapeHtml(humanBytes(t.total_freed_bytes || 0))}
+        <span class="sub" title="共体检 ${t.sweep_count || 0} 次">${t.sweep_count || 0} 次</span></span>
+      <span><b>上次释放：</b>${escapeHtml(humanBytes(t.last_freed_bytes || 0))}</span>
+    </div>
+    <div class="kv kv-dim">
+      <span><b>体检频率：</b>${escapeHtml(s.cron_effective || "未注册")}</span>
+      <span><b>下次体检：</b>${escapeHtml(shortTime(s.next_run) || "未注册")}</span>
+      <span title="${escapeHtml(fullTime(t.last_sweep_at))}">
+        <b>上次体检：</b>${escapeHtml(shortTime(t.last_sweep_at) || "从未")}</span>
+    </div>
+    ${renderDiagnostics(overview.diagnostics)}`;
 }
 
 function renderLayers(overview) {
   const host = $("layers");
-  const layers = Object.entries(overview.layers || {});
-  if (!layers.length) {
+  const entries = Object.entries(overview.layers || {});
+  if (!entries.length) {
     host.innerHTML = '<div class="empty">没有可维护的层。</div>';
     return;
   }
-  host.innerHTML = layers.map(([key, l]) => {
+  // 分组是这一块最要紧的改动：8 层平铺时，每张卡的边框、padding、按钮完全一样，
+  // 扫一眼分不出哪几层真的该动手——而那正是打开面板要回答的问题。
+  // 组内还要按「超得最多的排最前」：日志 2.29 GiB 与磁盘缓存 22 MiB 同样超阈值，
+  // 但只有前者值得先管。
+  const byUrgency = (a, b) => {
+    const ra = a[1].ratio, rb = b[1].ratio;
+    if (ra === null || ra === undefined) return rb === null || rb === undefined ? 0 : 1;
+    if (rb === null || rb === undefined) return -1;
+    return rb - ra;
+  };
+  const due = entries.filter(([, l]) => l.enabled && l.due).sort(byUrgency);
+  const normal = entries.filter(([, l]) => l.enabled && !l.due).sort(byUrgency);
+  const off = entries.filter(([, l]) => !l.enabled);
+  const card = ([key, l]) => {
     const cls = !l.enabled ? "off" : l.due ? "due" : "normal";
     const last = l.last || {};
     const lastText = last.last_run_at
-      ? `上次 ${escapeHtml(last.last_run_at)}${last.last_freed_bytes ? ` · 释放 ${humanBytes(last.last_freed_bytes)}` : ""}`
+      ? `上次 ${escapeHtml(shortTime(last.last_run_at))}${
+          last.last_freed_bytes ? ` · 释放 ${humanBytes(last.last_freed_bytes)}` : ""
+        }${last.last_acted ? "" : " · 未动手"}`
       : "尚未执行";
-    const bar = l.ratio === null || l.ratio === undefined
+    // 超阈值时进度条永远是满的，不带任何信息量（amount 里已经写了「/ 阈值」），
+    // 却白白占掉一整行。删掉它，卡片矮三分之一。
+    const ratio = l.ratio === null || l.ratio === undefined ? null : Math.min(100, l.ratio);
+    const bar = ratio === null || l.due
       ? ""
-      : `<div class="bar"><i style="width:${l.ratio}%"></i></div>`;
+      : `<div class="bar"><i style="width:${ratio}%"></i></div>`;
+    const logs = l.logs ? renderLogsBrief(l.logs) : "";
+    // 超阈值徽标用**未截断**的比例。早先这里用的是 min(100, ratio)，
+    // 结果「超 37%」有、「超 143 倍」反而没有——恰恰是差得最远的那个没有标记。
+    const over = l.ratio !== null && l.ratio !== undefined && l.ratio > 100
+      ? `<span class="over">${
+          l.ratio >= 1000 ? `超 ${(l.ratio / 100).toFixed(0)} 倍` : `超 ${l.ratio - 100}%`
+        }</span>`
+      : "";
+    const notes = [l.why, l.detail && l.detail !== l.why ? l.detail : ""]
+      .filter(Boolean)
+      .map(escapeHtml)
+      .join(" · ");
     return `<div class="layer ${cls}">
       <div class="head2">
-        <span class="name">${escapeHtml(l.label)}</span>
-        <span class="amount">${escapeHtml(l.amount || "")}</span>
+        <span class="name">${l.due ? '<span class="pulse-dot"></span>' : ""}${escapeHtml(l.label)}</span>
+        <span class="amount">${escapeHtml(l.amount || "")}${over}
+          <button class="btn mini danger-hover" data-force="${escapeHtml(key)}">强清</button>
+        </span>
       </div>
       ${bar}
-      <div class="meta">${escapeHtml(l.detail || "")}</div>
-      <div class="last">${lastText}</div>
-      ${l.config_error ? `<div class="err">目录配置有误：${escapeHtml(l.config_error)}</div>` : ""}
-      ${last.last_error ? `<div class="err">上次错误：${escapeHtml(last.last_error)}</div>` : ""}
-      <div class="row actions">
-        <button class="btn mini" data-force="${escapeHtml(key)}">强清这层</button>
+      ${logs ? `<div class="logs">${logs}</div>` : ""}
+      <div class="last">${notes}
+        <span class="when">${lastText}</span>
+        ${l.config_error ? `<span class="err">目录配置有误：${escapeHtml(l.config_error)}</span>` : ""}
+        ${last.last_error ? `<span class="err">上次错误：${escapeHtml(last.last_error)}</span>` : ""}
       </div>
     </div>`;
-  }).join("");
+  };
+  const group = (title, list, hint, fold) => {
+    if (!list.length) return "";
+    const body = `<div class="layers">${list.map(card).join("")}</div>`;
+    if (!fold) {
+      return `<div class="lgroup">
+        <div class="lgroup-head"><span class="lgroup-title">${escapeHtml(title)}</span>
+        <span class="lgroup-hint">${escapeHtml(hint)}</span></div>${body}</div>`;
+    }
+    return `<details class="lgroup-fold">
+      <summary>${escapeHtml(title)} · ${list.length}</summary>${body}</details>`;
+  };
+  host.innerHTML = [
+    group("要动手", due, "已超条件，等定时体检或你手动清", false),
+    group("正常", normal, "在阈值内，体检会跳过", false),
+    group("关着的", off, "这一层没启用", true),
+  ].join("");
   for (const el of host.querySelectorAll("[data-force]")) {
     el.onclick = () => forceLayer(el.dataset.force);
   }
 }
+
+// 日志层用插件自己的口径统计（上游那个数只是附注），所以这里比别的层多几行：
+// 到底有多少个文件、多大、最旧的多大、轮转了几份。终端里看不到日志时，
+// 这几个数字能直接回答「日志到底存不存在、存到哪去了」。
+function renderLogsBrief(logs) {
+  if (logs.missing) {
+    return `<div class="last">没找到日志目录：${escapeHtml(logs.root || "")}</div>`;
+  }
+  const bits = [`${logs.file_count} 个文件`];
+  if (logs.largest) bits.push(`最大 ${escapeHtml(logs.largest)}（${humanBytes(logs.largest_bytes)}）`);
+  if (logs.rotated) bits.push(`轮转 ${logs.rotated} 份`);
+  if (logs.oldest_days !== null && logs.oldest_days !== undefined) {
+    bits.push(`最旧 ${logs.oldest_days} 天`);
+  }
+  if (logs.growth) {
+    const sign = logs.growth > 0 ? "+" : "";
+    bits.push(`较上次 ${sign}${humanBytes(logs.growth)}`);
+  }
+  return `<div class="last">${bits.join(" · ")}</div>`;
+}
+
+// 插件模块的判定是三态而不是两态。以前「拿不到元数据」被当成「已停用」，
+// 于是一个正在跑的插件可能被自动抽掉模块；现在拿不准就归为 unknown，
+// 标出来让人看，但绝不自动动。
+const PLUGIN_STATE = {
+  running: ["ok", "运行中"],
+  stopped: ["off", "已停用"],
+  unknown: ["warn", "状态未知"],
+};
 
 function renderPlugins(rows) {
   const host = $("plugins");
@@ -698,14 +1093,18 @@ function renderPlugins(rows) {
     return;
   }
   host.innerHTML = rows
-    .map(
-      (r) => `<div class="plugin">
-        <span class="badge ${r.activated ? "ok" : "off"}">${r.activated ? "运行中" : "已停用"}</span>
-        <span class="id">${escapeHtml(r.display_name || r.plugin_id)} <span class="muted">${escapeHtml(r.plugin_id)}</span></span>
+    .map((r) => {
+      const status = r.status || (r.activated ? "running" : "stopped");
+      const [cls, label] = PLUGIN_STATE[status] || PLUGIN_STATE.unknown;
+      const canPurge = !r.self && status !== "running";
+      return `<div class="plugin">
+        <span class="badge ${cls}">${escapeHtml(label)}</span>
+        <span class="id" title="${escapeHtml(r.plugin_id)}">${escapeHtml(r.display_name || r.plugin_id)}</span>
+        <span class="pid" title="${escapeHtml(r.plugin_id)}">${escapeHtml(r.plugin_id)}</span>
         <span class="n">${r.module_count} 个模块</span>
-        ${r.self || r.activated ? "" : `<button class="btn mini" data-purge="${escapeHtml(r.plugin_id)}">立即清理</button>`}
-      </div>`
-    )
+        ${canPurge ? `<button class="btn mini" data-purge="${escapeHtml(r.plugin_id)}">立即清理</button>` : ""}
+      </div>`;
+    })
     .join("");
   for (const el of host.querySelectorAll("[data-purge]")) {
     el.onclick = () => purge(el.dataset.purge);
@@ -719,21 +1118,28 @@ function renderHistory(records) {
     host.innerHTML = '<div class="empty">还没有清理记录。自动模式会在条件达成时自动记录。</div>';
     return;
   }
-  host.innerHTML = records
-    .map((r) => {
-      const cls = r.error ? "err" : r.acted ? "acted" : "skip";
-      const tag = r.error ? "失败" : r.acted ? "已清理" : "跳过";
-      const detail = r.error || r.detail || r.skipped || "";
-      const freed = r.freed_bytes ? ` · 释放 ${humanBytes(r.freed_bytes)}` : "";
-      return `<div class="result ${cls}">
-        <div class="head2">
-          <span class="name">${escapeHtml(r.label || r.layer)}</span>
-          <span class="meta">${escapeHtml(r.at)}${freed}</span>
-        </div>
-        <div class="detail ${r.error ? "bad" : ""}">[${tag}] ${escapeHtml(detail)}</div>
-      </div>`;
-    })
-    .join("");
+  const row = (r) => {
+    const cls = r.error ? "err" : r.acted ? "acted" : "skip";
+    const tag = r.error ? "失败" : r.acted ? "已清理" : "跳过";
+    const detail = r.error || r.detail || r.skipped || "";
+    const freed = r.freed_bytes ? ` · 释放 ${humanBytes(r.freed_bytes)}` : "";
+    return `<div class="result ${cls}">
+      <div class="head2">
+        <span class="name">${escapeHtml(r.label || r.layer)}</span>
+        <span class="meta">${escapeHtml(shortTime(r.at))}${freed}</span>
+      </div>
+      <div class="detail ${r.error ? "bad" : ""}">[${tag}] ${escapeHtml(detail)}</div>
+    </div>`;
+  };
+  // 最近的常显，更旧的折起来。一屏摆四十条会让上面那些真正要看的东西被埋掉。
+  const recent = records.slice(0, 6);
+  const older = records.slice(6);
+  const fold = older.length
+    ? `<details class="lgroup-fold"><summary>更早的 ${older.length} 条</summary>${
+        older.map(row).join("")
+      }</details>`
+    : "";
+  host.innerHTML = fold + recent.map(row).join("");
 }
 
 function renderDiscover(candidates, configured, meta) {
@@ -833,13 +1239,19 @@ function renderInstances() {
   if (!state.instances.length) {
     host.innerHTML = '<div class="empty">还没有实例，点右上角「添加实例」。</div>';
     return;  }
-  host.innerHTML = state.instances.map((it, i) => `<div class="inst">
-    <label class="check"><input type="checkbox" data-f="enable" data-i="${i}" ${it.enable ? "checked" : ""} /><span>启用</span></label>
-    <input type="text" data-f="url" data-i="${i}" value="${escapeHtml(it.url)}" placeholder="http://127.0.0.1:3000 或 ws://127.0.0.1:3001" />
-    <input type="text" data-f="token" data-i="${i}" value="${escapeHtml(it.token || "")}" placeholder="${it.token_set ? "已配置，留空保持不变" : "留空＝自动解析"}" ${it.token_set ? "data-has-token=\"1\"" : ""} />
-    <input type="number" data-f="protocol_interval_hours" data-i="${i}" min="1" value="${it.protocol_interval_hours}" title="协议缓存清理间隔（小时）" />
-    <button class="btn mini" data-del="${i}">删除</button>
-  </div>`).join("");
+  host.innerHTML = state.instances.map((it, i) => {
+    const status = (state.statusByUrl || {})[it.url];
+    return `<div class="inst">
+      <span class="inst-state" title="${escapeHtml(status ? status.note : "")}">${
+        status ? `<span class="badge ${status.cls}">${escapeHtml(status.label)}</span>` : ""
+      }</span>
+      <label class="check"><input type="checkbox" data-f="enable" data-i="${i}" ${it.enable ? "checked" : ""} /><span>启用</span></label>
+      <input type="text" data-f="url" data-i="${i}" value="${escapeHtml(it.url)}" placeholder="http://127.0.0.1:3000 或 ws://127.0.0.1:3001" />
+      <input type="text" data-f="token" data-i="${i}" value="${escapeHtml(it.token || "")}" placeholder="${it.token_set ? "已配置，留空保持不变" : "留空＝自动解析"}" ${it.token_set ? "data-has-token=\"1\"" : ""} />
+      <input type="number" data-f="protocol_interval_hours" data-i="${i}" min="1" value="${it.protocol_interval_hours}" title="协议缓存清理间隔（小时）" />
+      <button class="btn mini" data-del="${i}">删除</button>
+    </div>`;
+  }).join("");
   for (const el of host.querySelectorAll("[data-i]")) {
     el.oninput = el.onchange = () => {
       const idx = Number(el.dataset.i);
@@ -1032,14 +1444,15 @@ function applyFound(file, address) {
 function fillSettings(s) {
   if (formDirty()) return;   // 用户正在改，别拿服务端的旧值覆盖回去
   $("sweep_cron").value = s.sweep_cron ?? "*/15 * * * *";
-  $("auto_enabled").checked = Boolean(s.auto_enabled);
-  $("auto_clean_plugin_modules").checked = Boolean(s.auto_clean_plugin_modules);
-  $("auto_adopt_cache_dirs").checked = Boolean(s.auto_adopt_cache_dirs);
-  for (const key of NUMERIC_SETTINGS) {
-    if (s[key] !== undefined) $(key).value = s[key];
+  for (const key of TOGGLE_SETTINGS) {
+    if ($(key)) $(key).checked = Boolean(s[key]);
   }
-  $("napcat_cache_dirs").value = (s.napcat_cache_dirs || []).join("\n");
-  $("media_dirs").value = (s.media_dirs || []).join("\n");
+  for (const key of NUMERIC_SETTINGS) {
+    if (s[key] !== undefined && $(key)) $(key).value = s[key];
+  }
+  for (const key of TEXTAREA_SETTINGS) {
+    if ($(key)) $(key).value = (s[key] || []).join("\n");
+  }
 }
 
 // ---------- 死实例检测 ----------
@@ -1061,15 +1474,14 @@ async function checkDead() {
 function renderDead(res) {
   const rows = res.rows || [];
   const note = $("dead-note");
-  if (res.checked < 2) {
-    $("dead").innerHTML = '<div class="empty">只配了一个实例，没有重复可查。</div>';
-    note.classList.add("hidden");
-    return;
-  }
   note.textContent = res.note || "";
   note.classList.remove("hidden");
   if (!rows.length) {
-    $("dead").innerHTML = `<div class="empty">${res.checked} 个实例，没发现重复或长期失联的。</div>`;
+    $("dead").innerHTML = `<div class="empty">${
+      res.checked
+        ? `${res.checked} 个实例，没发现重复或长期失联的。`
+        : "还没有配置任何 NapCat 实例。"
+    }</div>`;
     return;
   }
   $("dead").innerHTML = rows.map((r) => {
@@ -1079,10 +1491,19 @@ function renderDead(res) {
     const btn = r.removable
       ? `<button class="btn mini" data-url="${escapeHtml(r.url)}" data-occ="${Number(r.occurrence) || 0}">删除这一行</button>`
       : "";
-    return `<div class="plugin">
-      <span class="id">${escapeHtml(r.url)}</span>
-      <span class="n">${escapeHtml(r.reason)}</span>
-      ${badge}${btn}
+    // 依据来源要摆在明面上：静态证据（磁盘上的 QQ 号 / 同一份配置文件）
+    // 在 NapCat 连不上时也能成立，这正是原来看不出重复的原因。
+    const basis = r.basis === "static"
+      ? '<span class="badge warn">磁盘证据</span>'
+      : '<span class="badge off">实测</span>';
+    // 地址与说明分两行：挤在同一行时，长地址会被逐字符拆成
+    // 「htt p:// 12 7.0. 0.1: 300 2」。
+    return `<div class="find">
+      <div class="find-top">
+        <span class="find-url">${escapeHtml(r.url)}</span>
+        ${basis}${badge}${btn}
+      </div>
+      <div class="find-why">${escapeHtml(r.reason)}</div>
     </div>`;
   }).join("");
   for (const el of $("dead").querySelectorAll("[data-url]")) {
@@ -1100,6 +1521,68 @@ async function dropInstance(url, occurrence) {
   } catch (e) {
     toast("删除失败：" + e.message, "bad");
   }
+}
+
+// ---------- 平台配置体检（只读） ----------
+
+// Orbit 自己只连 NapCat 用的那几行；AstrBot 侧配了几条反向 WS、有没有两条
+// 撞了同一个端口，**以前完全没读过** cmd_config.json，所以一律看不见。
+async function checkPlatform() {
+  const btn = $("btn-platform");
+  btn.disabled = true;
+  $("platform").innerHTML = '<div class="empty">正在读平台配置…</div>';
+  try {
+    renderPlatform(await bridge.apiGet("platform"));
+  } catch (e) {
+    $("platform").innerHTML = `<div class="empty">读不到：${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderPlatform(res) {
+  const note = $("platform-note");
+  note.textContent = res.note || "";
+  note.classList.remove("hidden");
+  const files = (res.files || []).filter((f) => (f.entries || []).length);
+  if (!files.length) {
+    $("platform").innerHTML =
+      '<div class="empty">没找到平台配置（data/cmd_config.json 读不到或没有 platform 列表）</div>';
+    return;
+  }
+  const blocks = files.map((f) => {
+    const head = `<div class="find"><div class="find-top">
+      <span class="find-url">${escapeHtml(f.name)}</span>
+      <span class="muted">${escapeHtml(f.path)}</span></div></div>`;
+    const rows = f.entries.map((e) => `<div class="find">
+      <div class="find-top">
+        <span class="find-url">${escapeHtml(e.name)}</span>
+        ${e.port ? `<span class="badge off">端口 ${e.port}</span>` : ""}
+        <span class="badge ${e.enable ? "ok" : "off"}">${e.enable ? "启用" : "已停用"}</span>
+        ${e.orphan_port ? '<span class="badge warn">没找到对应的 NapCat</span>' : ""}
+        ${e.token_fp ? `<span class="muted">凭据 ${escapeHtml(e.token_fp)}</span>` : ""}
+      </div>
+    </div>`).join("");
+    return head + rows;
+  }).join("");
+  const conflicts = (res.conflicts || []).map((c) => `<div class="find">
+    <div class="find-top">
+      <span class="find-url">${c.kind === "duplicate" ? "重复配置" : "端口抢占"}</span>
+      <span class="badge bad">端口 ${c.port}</span>
+    </div>
+    <div class="find-why bad">${escapeHtml(c.detail)}</div>
+    <div class="find-why">${escapeHtml((c.names || []).join("、"))}</div>
+  </div>`).join("");
+  $("platform").innerHTML =
+    (conflicts ? `<div class="lgroup"><div class="lgroup-head">
+       <span class="lgroup-title">有 ${res.conflicts.length} 处冲突</span>
+       <span class="lgroup-hint">同一个端口只能绑一次</span></div>${conflicts}</div>` : "") +
+    `<div class="lgroup"><div class="lgroup-head">
+      <span class="lgroup-title">全部配置（${res.total} 条）</span>
+      <span class="lgroup-hint">凭据只比指纹，不显示原文</span></div>${blocks}</div>` +
+    '<p class="muted note">这一块<strong>只读</strong>。改平台配置要动 AstrBot 的核心配置，' +
+    '删错一条可能让某个机器人直接掉线，所以这里只帮你把它找出来；' +
+    '确认哪条是多余的之后，回 AstrBot 的「机器人」页面自己删。</p>';
 }
 
 // ---------- 空间地图（只读） ----------
@@ -1125,13 +1608,18 @@ function renderSpaces(res) {
     return;
   }
   const html = groups.map((g) => {
-    const head = `<div class="plugin"><span class="id">${escapeHtml(g.title)}</span>` +
-      `<span class="muted">${escapeHtml(g.hint || "")}</span></div>`;
-    const rows = (g.rows || []).map((r) => `<div class="plugin">
-      <span class="id">${escapeHtml(r.label)}</span>
-      <span class="n">${humanBytes(r.size_bytes)} / ${Number(r.file_count) || 0} 个文件</span>
-      <span class="muted">${escapeHtml(r.path)}</span>
-      ${r.truncated ? '<span class="badge off">未测完</span>' : ""}
+    const head = `<div class="find"><div class="find-top">
+        <span class="find-url">${escapeHtml(g.title)}</span>
+        <span class="muted">${escapeHtml(g.hint || "")}</span></div></div>`;
+    const rows = (g.rows || []).map((r) => `<div class="find">
+      <div class="find-top">
+        <span class="find-url">${escapeHtml(r.label)}</span>
+        <span class="n">${humanBytes(r.size_bytes)} / ${Number(r.file_count) || 0} 个文件</span>
+        ${r.truncated ? '<span class="badge off">未测完</span>' : ""}
+        ${r.kind ? `<span class="badge off">${escapeHtml(r.kind)}</span>` : ""}
+        ${r.orphan ? '<span class="badge warn">没人用了</span>' : ""}
+      </div>
+      <div class="find-why">${escapeHtml(r.path)}</div>
     </div>`).join("");
     return head + rows;
   }).join("");
@@ -1141,7 +1629,8 @@ function renderSpaces(res) {
   $("spaces").innerHTML =
     `<div class="kv"><span>合计：<b>${humanBytes(res.total_bytes || 0)}</b></span>` +
     `<span>耗时 ${Number(res.elapsed_ms) || 0} ms</span></div>` + html + warn +
-    '<p class="muted note">纯只读统计。发现大的 QQ 目录，把它填进上面的「自选媒体目录」就能纳入自动清理。</p>';
+    '<p class="muted note">纯只读统计。标了「没人用的」是插件卸载后留下的数据目录，' +
+    '插件只会提示不自动删——里面可能有你特意留着的东西。</p>';
 }
 
 // ---------- 插件目录里的客观垃圾 ----------
@@ -1166,6 +1655,7 @@ function renderJunk(res) {
   const note = $("junk-note");
   note.textContent = res.note || "";
   note.classList.remove("hidden");
+  state.junk = res;
   const rows = [];
   for (const kind of ["broken", "zip", "pycache"]) {
     for (const item of res[kind] || []) {
@@ -1180,11 +1670,13 @@ function renderJunk(res) {
   $("junk").innerHTML =
     `<div class="kv"><span>合计可删：<b>${humanBytes(res.total_bytes || 0)}</b></span>` +
     `<span>${rows.length} 项</span></div>` +
-    rows.map((r) => `<div class="plugin">
-      <span class="id">${escapeHtml(r.path)}</span>
-      <span class="n">${humanBytes(r.size_bytes)}</span>
-      <span class="badge off">${escapeHtml(JUNK_LABEL[r.kind] || r.kind)}</span>
-      <button class="btn mini" data-junk-kind="${escapeHtml(r.kind)}" data-junk-path="${escapeHtml(r.path)}">删除</button>
+    rows.map((r) => `<div class="find">
+      <div class="find-top">
+        <span class="find-url">${escapeHtml(r.path)}</span>
+        <span class="n">${humanBytes(r.size_bytes)}</span>
+        <span class="badge off">${escapeHtml(JUNK_LABEL[r.kind] || r.kind)}</span>
+        <button class="btn mini" data-junk-kind="${escapeHtml(r.kind)}" data-junk-path="${escapeHtml(r.path)}">删除</button>
+      </div>
     </div>`).join("");
   for (const el of $("junk").querySelectorAll("[data-junk-path]")) {
     el.onclick = () => dropJunk(el.dataset.junkKind, el.dataset.junkPath);
@@ -1202,7 +1694,63 @@ async function dropJunk(kind, path) {
   }
 }
 
+// 一键清除。与逐项删除的判据完全相同（就是 _classify_junk 那三类），
+// 区别只在于少点几十次。所以它坚持两道：先列清单、确认后才动手。
+// 「装了但没加载」这类需要推断的，永远不在这条路径上。
+async function purgeAllJunk() {
+  const btn = $("btn-junk-all");
+  btn.disabled = true;
+  try {
+    if (!state.junk) {
+      $("junk").innerHTML = '<div class="empty">正在扫描…</div>';
+      state.junk = await bridge.apiGet("junk");
+    }
+    const res = state.junk;
+    const plan = res.all || {};
+    if (!plan.count) {
+      toast("没有可一键清除的垃圾。", "ok");
+      return;
+    }
+    const msg = `将清除以下客观垃圾，合计 ${humanBytes(plan.bytes || 0)}：\n\n` +
+      `· 没装完的插件目录 ${plan.broken || 0} 个\n` +
+      `· 遗留安装包 ${plan.zip || 0} 个\n` +
+      `· __pycache__ ${plan.pycache || 0} 个\n\n` +
+      "只删这些满足条件的目录与文件；装了但没加载的插件一律不动。\n确定继续？";
+    if (!await askConfirm(msg)) return;
+    const done = await bridge.apiPost("junk", { action: "purge_all" });
+    state.junk = null;
+    const bits = [`已清除 ${done.deleted || 0} 项`];
+    if (done.freed_bytes) bits.push(`释放 ${humanBytes(done.freed_bytes)}`);
+    if (done.protected) bits.push(`${done.protected} 项在 7 天年龄锁内`);
+    if (done.failed) bits.push(`${done.failed} 项没删掉`);
+    // 逐项明细：只说「删了 N 项」，用户没法判断是自己预期的东西。
+    const detail = (done.detail || []).join("；");
+    toast(
+      bits.join(" · ") + (detail ? "\\n\\n" + detail : ""),
+      done.failed ? "warn" : (done.deleted ? "ok" : "warn")
+    );
+    await showJunk();
+  } catch (e) {
+    toast("清除失败：" + e.message, "bad");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- 工具 ----------
+
+// 时间戳直接扔 ISO 串很难扫：「2026-09-30T16:15:02+08:00」里的年份和时区
+// 每天看都是一样的，淹没了真正有用的小时与分钟。完整值放 title 里。
+function shortTime(value) {
+  const text = String(value || "").trim();
+  const matched = text.match(/^\d{4}-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!matched) return text;
+  return `${matched[1]}-${matched[2]} ${matched[3]}:${matched[4]}`;
+}
+
+function fullTime(value) {
+  return String(value || "").replace("T", " ").replace(/[+-]\d{2}:\d{2}$/, "");
+}
 
 function humanBytes(value) {
   let size = Number(value) || 0;
@@ -1221,3 +1769,6 @@ function escapeHtml(s) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
 }
+
+// 整个文件跑完再启动：上方所有 const 到这里都已初始化。
+init();

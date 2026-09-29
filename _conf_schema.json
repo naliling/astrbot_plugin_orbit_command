@@ -96,6 +96,24 @@
     "hint": "填 0 时沿用「超阈值就清」；一旦填大于 0，就只删超过这么多天的轮转日志，当前正在写的 astrbot.log 永不删。推荐 7。",
     "default": 0
   },
+  "auto_clean_plugin_junk": {
+    "type": "bool",
+    "description": "自动清除插件垃圾",
+    "hint": "定时体检时顺手清掉没装完的插件目录、遗留安装包与 __pycache__。只清这三类，不推断「装了但没加载」。最近 7 天内的目录一律不动，避免打断正在安装的插件。",
+    "default": false
+  },
+  "unreachable_limit": {
+    "type": "int",
+    "description": "疑似失联判定次数",
+    "hint": "连续这么多次体检连不上才标为「疑似失联」。默认 3，配上 15 分钟的推进闸约等于 45 分钟。调小会更早提醒，但一个只是暂时没启动的 bot 也可能被算进去。",
+    "default": 3
+  },
+  "log_dirs": {
+    "type": "list",
+    "description": "日志目录（留空 = 自动找）",
+    "hint": "留空时插件会依次找 data/logs、当前工作区的 logs、AstrBot 根目录与 ASTRBOT_LOG_DIR。终端里明明满屏输出、面板上却报 0 时，把它填成实际路径即可。",
+    "default": []
+  },
   "napcat_cache_threshold_mb": {
     "type": "int",
     "description": "NapCat 文件缓存阈值 (MiB)",

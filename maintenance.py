@@ -102,14 +102,62 @@ class ModuleCacheManager:
         if not loaded:
             raise ModuleCacheError("没有找到该插件已加载的模块")
         metadata = self._metadata_for(value)
-        if metadata is not None and bool(getattr(metadata, "activated", False)):
+        if metadata is None:
+            raise ModuleCacheError(
+                "拿不到该插件的元数据，无法确认它已停用。可以在面板上手动清理"
+            )
+        if bool(getattr(metadata, "activated", False)):
             raise ModuleCacheError("该插件仍处于激活状态，请先停用")
         return self._drop_modules(loaded)
 
     def is_active(self, plugin_id: str) -> bool:
+        """手动清理路径用的宽松判定：拿不到元数据就当作不活跃。
+
+        自动路径不走这里——它要求「确认已停用」，见 clean_inactive_plugins。
+        """
         value = self._validate_plugin_id(plugin_id)
         metadata = self._metadata_for(value)
         return bool(getattr(metadata, "activated", False))
+
+    def known_ids(self) -> set[str]:
+        """注册表里所有插件的名字，不管启用还是停用。
+
+        「插件数据残留」要比对的是「这个插件还在不在 AstrBot 里」，
+        而不是我这个插件当前还持有它的模块——停用插件的模块会被回收掉，
+        拿 sys.modules 去比会把「已停用」误报成「已卸载」。
+        整个方法不许抛：它被 overview 调用，一抛整个面板就停在「正在读取」。
+        """
+        names: set[str] = set()
+        try:
+            getter = getattr(self.context, "get_all_stars", None)
+            if not callable(getter):
+                return names
+            for metadata in getter() or []:
+                for attr in ("root_dir_name", "name"):
+                    try:
+                        value = str(getattr(metadata, attr, "") or "").strip()
+                    except Exception:
+                        continue
+                    if value:
+                        names.add(value)
+        except Exception:
+            return set()
+        return names
+
+    def status_of(self, plugin_id: str) -> str:
+        """三态：running / stopped / unknown。
+
+        为什么要第三态：之前拿不到元数据就被当成「已停用」，而元数据拿不到
+        的真实原因很多（注册表里没有、get_all_stars 不可用、name 与
+        root_dir_name 都对不上）。把它当成「是」就可能把一个正在跑的插件
+        从 sys.modules 里抽掉——它后续任何懒加载都会重新执行一遍模块代码。
+        判断不了就说不知道，别替用户决定。
+        """
+        value = self._validate_plugin_id(plugin_id)
+        metadata = self._metadata_for(value)
+        if metadata is None:
+            return "unknown"
+        return "running" if bool(getattr(metadata, "activated", False)) else "stopped"
 
     def purge_loaded(self, plugin_id: str) -> list[str]:
         """移除一个插件已加载的模块，不校验激活状态。
@@ -139,6 +187,7 @@ class ModuleCacheManager:
         rows: list[dict[str, Any]] = []
         for item in self.snapshot():
             plugin_id = str(item["plugin_id"])
+            status = self.status_of(plugin_id)
             metadata = self._metadata_for(plugin_id)
             rows.append(
                 {
@@ -146,7 +195,8 @@ class ModuleCacheManager:
                     "plugin_id": plugin_id,
                     "display_name": str(getattr(metadata, "name", "") or plugin_id),
                     "version": str(getattr(metadata, "version", "") or ""),
-                    "activated": bool(getattr(metadata, "activated", False)),
+                    "activated": status == "running",
+                    "status": status,
                     "module_count": len(item["modules"]),
                     "self": plugin_id == self.current_plugin_id,
                 }
@@ -154,6 +204,11 @@ class ModuleCacheManager:
         return rows
 
     def clean_inactive_plugins(self) -> dict[str, list[str] | str]:
+        """自动清理：只处理「确认已停用」的那些。
+
+        状态未知的跳过并报出来——自动路径下「不知道」不能当成「是」。
+        手动路径（purge_loaded）不受这条限制：那是用户点过确认的。
+        """
         cleaned: dict[str, list[str]] = {}
         skipped: list[str] = []
         for item in self.snapshot():
@@ -161,8 +216,11 @@ class ModuleCacheManager:
             if plugin_id == self.current_plugin_id:
                 skipped.append(f"{plugin_id}（当前插件）")
                 continue
-            metadata = self._metadata_for(plugin_id)
-            if metadata is not None and bool(getattr(metadata, "activated", False)):
+            status = self.status_of(plugin_id)
+            if status == "unknown":
+                skipped.append(f"{plugin_id}（状态未知，不自动处理）")
+                continue
+            if status == "running":
                 skipped.append(f"{plugin_id}（仍激活）")
                 continue
             try:

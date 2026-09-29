@@ -1,14 +1,16 @@
 name: astrbot_plugin_orbit_command
 display_name: Orbit Cache
-short_desc: 缓存用完就扔的自动清洁工，附带空间地图与重复 Bot 检测。
+short_desc: 容器里的维护工：清理、保养、查重，面板上一眼看懂。
 desc: |
   把会越攒越多的东西定期扫掉：停用插件的内存、NapCat 的图片与文件缓存、
-  NapCat 协议缓存、AstrBot 临时文件与日志，以及你指定目录里的过期媒体文件。
-  另外还有一个只读的空间地图，告诉你空间到底被谁吃了。
+  NapCat 协议缓存、AstrBot 临时文件与日志、插件目录垃圾，以及你指定目录里的
+  过期媒体文件。除清理外还管三件维护事：重复 Bot 检测（连不上也能查出来）、
+  插件数据残留与数据库增长观测、插件模块三态回收。
+  面板按「要动手 / 正常 / 关着的」分组，打开第一眼就知道该管哪层。
 
   装上就干活。停用插件时顺手清内存，到点自动清缓存，缓存目录自己搜自己认。
   你只需要点一次「试运行」，看看它到底会删什么。
-version: "1.4.0"
+version: "1.5.0"
 author: 娜莉灵
 repo: https://github.com/naliling/astrbot_plugin_orbit_command
 astrbot_version: ">=4.27.5,<5"

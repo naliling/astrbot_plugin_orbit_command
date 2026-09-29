@@ -36,7 +36,14 @@ from .maintenance import (
     ModuleCacheManager,
 )
 from .napcat import NapCatCacheClient, NapCatEndpoint
-from .spaces import plugin_junk, remove_junk, usage_map
+from .spaces import (
+    log_inventory,
+    platform_audit,
+    plugin_junk,
+    purge_all_junk,
+    remove_junk,
+    usage_map,
+)
 from .scheduler import LAYERS, SweepEngine
 from .transport import validate_base_url
 
@@ -342,8 +349,11 @@ class OrbitCachePlugin(Star):
             f"/{PLUGIN_ID}/instance", self.api_remove_instance, ["POST"], "从配置里删掉一个实例"
         )
         reg(f"/{PLUGIN_ID}/spaces", self.api_spaces, ["GET"], "空间地图（只读）")
+        reg(f"/{PLUGIN_ID}/logs", self.api_logs, ["GET"], "日志盘点（只读）")
+        reg(f"/{PLUGIN_ID}/platform", self.api_platform_audit, ["GET"], "平台配置体检")
+        reg(f"/{PLUGIN_ID}/attention", self.api_attention, ["POST"], "标记需要处理的事已读")
         reg(f"/{PLUGIN_ID}/junk", self.api_junk, ["GET"], "插件目录里的客观垃圾")
-        reg(f"/{PLUGIN_ID}/junk", self.api_junk_remove, ["POST"], "删除一项客观垃圾")
+        reg(f"/{PLUGIN_ID}/junk", self.api_junk_remove, ["POST"], "删除一项或一键清除垃圾")
 
     async def api_spaces(self):
         """只读：回答「空间到底被谁吃了」。
@@ -356,6 +366,7 @@ class OrbitCachePlugin(Star):
                 media_dirs=self.engine.settings()["media_dirs"],
                 cache_dirs=[*self.engine.settings()["media_dirs"],
                             *self.engine.active_dirs()[0]],
+                loaded=frozenset(self.module_cache.known_ids()),
             )
         except Exception as exc:
             return error_response(_friendly_error("统计空间", exc), status_code=500)
@@ -376,6 +387,12 @@ class OrbitCachePlugin(Star):
 
     async def api_junk_remove(self):
         payload = await request.json(default={})
+        action = str(payload.get("action") or "").strip()
+        if action == "purge_all":
+            result = await purge_all_junk()
+            if not result.get("ok") and not result.get("deleted"):
+                return error_response(str(result.get("error") or "清除失败"), status_code=400)
+            return json_response(result)
         kind = str(payload.get("kind") or "").strip()
         target = str(payload.get("path") or "").strip()
         if kind not in ("broken", "zip", "pycache"):
@@ -386,6 +403,47 @@ class OrbitCachePlugin(Star):
         if not result.get("ok"):
             return error_response(str(result.get("error") or "删除失败"), status_code=400)
         return json_response(result)
+
+    async def api_platform_audit(self):
+        """读 AstrBot 自己的 platform 列表，找出重复与端口抢占。
+
+        以前 Orbib 只看自己连 NapCat 用的那份 onebot_instances，
+        对 AstrBot 侧配了几条反向 WS 一无所知。
+        """
+        try:
+            payload = await platform_audit(self._token_dirs())
+        except Exception as exc:
+            return error_response(_friendly_error("体检平台配置", exc), status_code=500)
+        payload["note"] = (
+            "只读体检，不改任何东西。凭据只比对指纹、不显示原文。"
+        )
+        return json_response(payload)
+
+    async def api_attention(self):
+        """把「需要处理的事」标成看过了。
+
+        本插件只在面板里提醒、不推送，所以未读状态得存在服务端：
+        面板跑在 iframe 里，sandbox 缺 allow-same-origin 时 localStorage
+        会直接抛 SecurityError，拿它存就等于没存。
+        """
+        payload = await request.json(default={})
+        if str(payload.get("action") or "") != "ack":
+            return error_response("未知 action", status_code=400)
+        result = self.engine.ack_attention()
+        await self.engine.save_state()
+        return json_response(result)
+
+    async def api_logs(self):
+        """日志盘点：只读，回答「日志到底在哪、多大」。"""
+        try:
+            payload = await log_inventory(self.engine.settings()["log_dirs"])
+        except Exception as exc:
+            return error_response(_friendly_error("盘点日志", exc), status_code=500)
+        payload["note"] = (
+            "终端里的输出与 WebUI 日志面板读的是同一份文件；如果这里显示 0，"
+            "多半是日志写在别处，把实际路径填到「日志目录」里即可。"
+        )
+        return json_response(payload)
 
     async def api_dead_instances(self):
         """单独一个接口而不是塞进 overview：面板每 30 秒刷一次，
@@ -398,6 +456,8 @@ class OrbitCachePlugin(Star):
             "rows": findings,
             "checked": len(self.napcat.endpoints),
             "note": (
+                "标为「磁盘证据」的判定不依赖连接：只读 onebot11*.json 的文件名与"
+                "网络配置就能成立，所以 NapCat 挂掉时照样查得出重复。"
                 "删除只会移除配置里的这一行，不会动 NapCat 磁盘上的任何数据；"
                 "删错了加回来就行。连接不上的不提供删除。"
             ),

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .maintenance import _is_protected
 
@@ -456,3 +457,79 @@ def redact_configs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def redact_dirs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(rows)
+
+
+# ---------- 实例身份：连不上时也能判重复的依据 ----------
+
+# 默认端口省略掉，否则 http://1.0.0.1:80 和 http://1.0.0.1 是两个地址。
+_DEFAULT_PORTS = {"http": 80, "ws": 80, "https": 443, "wss": 443}
+
+
+def normalize_endpoint(url: str) -> str:
+    """把地址归一，让写法不同但指向同一个的地址能认出彼此。"""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text if "//" in text else f"//{text}")
+        scheme = (parts.scheme or "http").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return text.rstrip("/").lower()
+    if not host:
+        return text.rstrip("/").lower()
+    authority = host
+    if port and port != _DEFAULT_PORTS.get(scheme):
+        authority = f"{host}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def identity_sync(explicit: list[str]) -> dict[str, dict[str, Any]]:
+    """地址 → 它在磁盘上对应哪个 QQ 号、哪份配置文件。
+
+    全程只读 onebot11*.json，不发一个网络请求。重复检测靠它就能在
+    NapCat 进程已经挂掉时照样判出重复——而这正是原来看不出来的场景：
+    连不上时 get_login_info 拿不到 QQ 号，重复判定就整条失效了，
+    一个确实重复且没用的实例只会得到一句「连不上」。
+
+    两级匹配：先按归一后的完整地址，miss 了再按 (host, port)。
+    """
+    exact: dict[str, dict[str, Any]] = {}
+    loose: dict[tuple[str, int], dict[str, Any]] = {}
+    for entry in scan_sync(explicit)["configs"]:
+        account = str(entry.get("account") or "")
+        for server in entry.get("servers", []):
+            if not server.get("can_connect") or not server.get("enable"):
+                continue
+            identity = {
+                "account": account,
+                "file": str(entry.get("file") or ""),
+                "name": str(server.get("name") or ""),
+            }
+            address = normalize_endpoint(str(server.get("address") or ""))
+            if address:
+                exact.setdefault(address, identity)
+            try:
+                parts = urlsplit(str(server.get("address") or ""))
+                host = (parts.hostname or "").lower()
+                port = int(parts.port or 0)
+            except ValueError:
+                host, port = "", 0
+            if host and port:
+                loose.setdefault((host, port), identity)
+    return {"exact": exact, "loose": loose}
+
+
+def identity_for(url: str, table: dict[str, Any]) -> dict[str, Any]:
+    """从 identity_sync 的结果里查一个地址；查不到返回空 dict。"""
+    normalized = normalize_endpoint(url)
+    hit = table.get("exact", {}).get(normalized)
+    if hit:
+        return hit
+    try:
+        parts = urlsplit(url if "//" in url else f"//{url}")
+        key = ((parts.hostname or "").lower(), int(parts.port or 0))
+    except ValueError:
+        return {}
+    return table.get("loose", {}).get(key, {})

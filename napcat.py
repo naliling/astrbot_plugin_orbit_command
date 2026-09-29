@@ -3,9 +3,25 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from .auth import classify_transport
 from .transport import OneBotTransport
 
 _AUTH_CODES = {401, 403}
+
+# 传输层报错归到这几种就能直接告诉用户「改什么」：服务没启动要起进程，
+# 无响应要看防火墙，解析失败要改主机名。归到 other 只能说「失败」。
+_KIND_STATE = {
+    "refused:": "refused",
+    "timeout:": "timeout",
+    "dns:": "dns",
+    "other:": "error",
+}
+
+
+def _state_of(exc: BaseException) -> str:
+    if getattr(exc, "retcode", None) in _AUTH_CODES:
+        return "auth"
+    return _KIND_STATE.get(classify_transport(exc), "error")
 
 
 class NapCatEndpoint:
@@ -99,7 +115,12 @@ class NapCatCacheClient:
             raise
 
     async def status(self) -> list[dict[str, Any]]:
-        """逐实例探测。单个实例失败不影响其他实例。"""
+        """逐实例探测。单个实例失败不影响其他实例。
+
+        state 是给面板看的结论：running / disabled / refused / timeout /
+        dns / auth / error。以前只有 connected 与一串原始报错文本，
+        「服务没启动」和「Token 错了」长得一样，用户只能自己猜。
+        """
         results: list[dict[str, Any]] = []
 
         async def probe(endpoint: NapCatEndpoint) -> dict[str, Any]:
@@ -108,12 +129,20 @@ class NapCatCacheClient:
                 "enable": endpoint.enable,
                 "connected": False,
                 "error": "",
+                "state": "unknown",
             }
+            if not endpoint.enable:
+                # 不去探测你自己关掉的实例：探测它只会把「已停用」和
+                # 「连不上」混成同一个状态，而这两者要采取的动作完全不同。
+                row["state"] = "disabled"
+                return row
             try:
                 await self._call(endpoint, "get_version_info")
                 row["connected"] = True
+                row["state"] = "running"
             except Exception as exc:
                 row["error"] = str(exc)[:160]
+                row["state"] = _state_of(exc)
             return row
 
         if not self.endpoints:

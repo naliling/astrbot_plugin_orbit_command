@@ -345,4 +345,13 @@ async def probe_auth(
     }
 
 
-__all__ = ["TokenResolver", "probe_state", "probe_auth"]
+__all__ = ["TokenResolver", "probe_state", "probe_auth", "classify_transport"]
+
+
+def classify_transport(exc: BaseException) -> str:
+    """公开给状态表用：把底层错误归成 refused / timeout / dns / other。
+
+    实例状态表要能回答「这个挂着的 bot 是没启动还是被墙了」，而
+    str(exc) 里混着 errno 数字与套娃的 cause，交给人去读是不行的。
+    """
+    return _classify_transport(exc)

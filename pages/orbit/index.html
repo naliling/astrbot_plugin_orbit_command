@@ -7,15 +7,44 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <!-- 开场动画。默认不显示，只有 JS 主动加上 html.intro-on 才亮出来——
-       这样即使脚本没跑起来、或者中途报错，面板也不会被一块黑幕永久挡住。 -->
+  <!-- 开场动画。默认就是一块不透明的黑幕（CSS 里写死），所以页面不会出现
+       「先白闪一下再开始动画」；脚本没跑起来时它会在 9 秒后自己退开。
+       标题是叠起来的两层：底下 .intro-ghost 自带静态高斯模糊，上面 .intro-title
+       是清晰的那份，两层一淡一显就是「从模糊里显出来」，
+       而且模糊值从头到尾不重算（它是静态的），所以是满帧。 -->
   <div class="intro" id="intro" aria-hidden="true">
     <div class="intro-stars" id="intro-stars"></div>
-    <div class="intro-title" id="intro-title">Orbit Cache</div>
+    <div class="intro-title-wrap">
+      <div class="intro-ghost" id="intro-ghost">Orbit Cache</div>
+      <div class="intro-title" id="intro-title">Orbit Cache</div>
+    </div>
     <div class="intro-sub" id="intro-sub">娜莉灵</div>
+    <div class="intro-wait" id="intro-wait">正在读取…</div>
   </div>
 
   <div class="wrap">
+    <!-- 需要处理的事。放最前面：它只在面板里提醒，不推送，
+         「打开第一眼就看见」是它唯一的传达途径。
+         **刻意不吸顶**：sticky 会盖住下面一整屏的内容（包括操作按钮），
+         而「一直显示」比「滚过去就看不到」更招人烦。 -->
+    <!-- 需要处理的事。放在操作按钮**下面**：它 position:sticky 会吸在顶部，
+         放在按钮上方时，向下滚一点就把「刷新 / 试运行 / 清理」全盖住了，
+         按钮变得点不到。 -->
+    <!-- 需要处理的事。吸顶放在最前面：本插件只在面板里提醒、不推送，
+         所以「打开第一眼就看见」是它唯一的传达途径。
+         结构预置在这里，JS 只填内容：整块重建会把按钮连同 hover 状态一起换掉。 -->
+    <section class="notice" id="notice" hidden>
+      <div class="notice-head">
+        <span class="notice-title" id="notice-title"></span>
+        <span class="head-actions">
+          <button id="notice-dead" class="btn mini" type="button">重新检测重复实例</button>
+          <button id="notice-ack" class="btn mini" type="button">知道了</button>
+        </span>
+      </div>
+      <div class="notice-items" id="notice-items"></div>
+    </section>
+
+
     <div class="theme-bar">
       <span class="theme-label">外观</span>
       <button class="swatch" data-theme-set="deep" style="background:linear-gradient(135deg,#070b14,#38bdf8)" title="深空" aria-label="深空"></button>
@@ -41,6 +70,15 @@
       </div>
     </header>
 
+
+    <section class="card" id="sweep-card" style="display:none">
+      <div class="row">
+        <strong>本次清理结果</strong>
+        <span id="sweep-summary" class="muted"></span>
+      </div>
+      <div id="sweep-body"></div>
+    </section>
+
     <section class="card" id="dryrun-card" style="display:none">
       <div class="row">
         <strong>试运行结果</strong>
@@ -57,14 +95,24 @@
       <div id="setup-body"></div>
     </section>
 
-    <section class="card">
-      <div class="row">
-        <strong>调度状态</strong>
-        <span id="auto-badge" class="badge">加载中…</span>
-      </div>
-      <div id="last-error" class="banner hidden"></div>
-      <div id="schedule" class="kv"></div>
-    </section>
+    <div class="pair">
+      <section class="card">
+        <div class="row">
+          <strong>调度状态</strong>
+          <span id="auto-badge" class="badge">加载中…</span>
+        </div>
+        <div id="last-error" class="banner hidden"></div>
+        <div id="schedule" class="kv"></div>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <strong>插件模块占用</strong>
+          <span class="muted">停用后本插件会立刻自动清理</span>
+        </div>
+        <div id="plugins" class="plugins"></div>
+      </section>
+    </div>
 
     <section class="card">
       <div class="row">
@@ -84,6 +132,9 @@
       </div>
       <div id="token-banner" class="banner hidden"></div>
       <div id="inst-state" class="kv"></div>
+      <p class="section-label">当前状态</p>
+      <div id="inst-table" class="inst-table"></div>
+      <p class="section-label">改完点保存</p>
       <div id="token-list" class="discover"></div>
       <div id="inst-list" class="inst-list"></div>
       <div class="row actions">
@@ -100,22 +151,67 @@
       </p>
     </section>
 
-    <section class="card">
-      <div class="row">
-        <strong>死实例检测</strong>
-        <div class="head-actions">
-          <button id="btn-dead" class="btn ghost">检测死实例</button>
+    <div class="pair">
+      <section class="card">
+        <div class="row">
+          <strong>死实例检测</strong>
+          <div class="head-actions">
+            <button id="btn-dead" class="btn ghost">检测死实例</button>
+          </div>
         </div>
-      </div>
-      <div id="dead-note" class="muted note hidden"></div>
-      <div id="dead" class="plugins"></div>
-    </section>
+        <div id="dead-note" class="muted note hidden"></div>
+        <div id="dead" class="plugins"></div>
+      </section>
 
-    <section class="card">
-      <div class="row">
-        <strong>可调项</strong>
-        <span class="muted">改完点保存，立即生效并重建定时任务</span>
-      </div>
+      <section class="card">
+        <div class="row">
+          <strong>平台配置体检</strong>
+          <div class="head-actions">
+            <button id="btn-platform" class="btn ghost">查一下</button>
+          </div>
+        </div>
+        <div id="platform-note" class="muted note hidden"></div>
+        <div id="platform"><div class="empty">读 AstrBot 自己的 platform 列表：哪些配置指向同一个端口、哪些是同一条被改了名字。只读，不改任何东西。</div></div>
+      </section>
+    </div>
+
+      <section class="card">
+        <div class="row">
+          <strong>插件目录里的垃圾</strong>
+          <div class="head-actions">
+            <button id="btn-junk" class="btn ghost">扫一下</button>
+            <button id="btn-junk-all" class="btn ghost">一键清除</button>
+          </div>
+        </div>
+        <div id="junk-note" class="muted note hidden"></div>
+        <div id="junk" class="plugins"><div class="empty">没装完的插件目录、遗留安装包、__pycache__。先列出来，确认后再删。</div></div>
+      </section>
+    </div>
+
+    <div class="pair">
+      <section class="card">
+        <div class="row">
+          <strong>空间地图</strong>
+          <div class="head-actions">
+            <button id="btn-spaces" class="btn ghost">统计一下</button>
+          </div>
+        </div>
+        <div id="spaces" class="plugins"><div class="empty">只读统计，不删任何东西。点上面按钮开始。</div></div>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <strong>清理历史</strong>
+          <span id="history-count" class="muted"></span>
+        </div>
+        <div id="history" class="results"></div>
+      </section>
+    </div>
+
+    <details class="card" id="settings-card">
+      <summary>可调项</summary>
+      <div class="fold-body">
+      <p class="muted note" style="margin-top:0">改完点保存，立即生效并重建定时任务。</p>
       <div class="grid">
         <label class="field small">
           <span>体检频率（crontab）</span>
@@ -153,6 +249,10 @@
           <span>日志保留天数 (0 = 旧行为)</span>
           <input id="log_retention_days" type="number" min="0" />
         </label>
+        <label class="field small">
+          <span>疑似失联判定 (次)</span>
+          <input id="unreachable_limit" type="number" min="1" />
+        </label>
         <div class="field small toggles">
           <label class="check">
             <input id="auto_enabled" type="checkbox" />
@@ -165,6 +265,10 @@
           <label class="check">
             <input id="auto_adopt_cache_dirs" type="checkbox" />
             <span>自动接管搜索到的缓存目录</span>
+          </label>
+          <label class="check">
+            <input id="auto_clean_plugin_junk" type="checkbox" />
+            <span>自动清除插件垃圾（带 7 天年龄锁）</span>
           </label>
         </div>
       </div>
@@ -179,48 +283,17 @@
         </span>
         <textarea id="media_dirs" rows="3" placeholder="留空即可关闭这一层；每行一个绝对路径"></textarea>
       </div>
+      <div class="field">
+        <span>日志目录（留空 = 自动找 <code>data/logs</code>）。终端里看不到日志时把它填成实际路径。</span>
+        <textarea id="log_dirs" rows="2" placeholder="留空即可；每行一个绝对路径"></textarea>
+      </div>
       <div class="row actions">
         <button id="btn-discover" class="btn ghost">自动探测目录</button>
         <button id="btn-save" class="btn primary">保存</button>
       </div>
       <div id="discover" class="discover"></div>
-    </section>
-    <section class="card">
-      <div class="row">
-        <strong>插件模块占用</strong>
-        <span class="muted">停用后本插件会立刻自动清理</span>
       </div>
-      <div id="plugins" class="plugins"></div>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <strong>空间地图</strong>
-        <div class="head-actions">
-          <button id="btn-spaces" class="btn ghost">统计一下</button>
-        </div>
-      </div>
-      <div id="spaces" class="plugins"><div class="empty">只读统计，不删任何东西。点上面按钮开始。</div></div>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <strong>插件目录里的垃圾</strong>
-        <div class="head-actions">
-          <button id="btn-junk" class="btn ghost">扫一下</button>
-        </div>
-      </div>
-      <div id="junk-note" class="muted note hidden"></div>
-      <div id="junk" class="plugins"><div class="empty">没装完的插件目录、遗留安装包、__pycache__。先列出来，确认后再删。</div></div>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <strong>清理历史</strong>
-        <span id="history-count" class="muted"></span>
-      </div>
-      <div id="history" class="results"></div>
-    </section>
+    </details>
   </div>
 
   <script type="module" src="./app.js"></script>

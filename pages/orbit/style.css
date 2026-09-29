@@ -131,6 +131,88 @@ body::before {
   padding: 22px 16px 64px;
 }
 
+/* 两张信息量接近的卡片并排。单列长条是「单调」的主因：所有卡片的圆角、
+   描边、padding 完全一样，滚下去没有节奏。align-items:start 让两张各贴各的顶，
+   不会被强行拉到一样高。 */
+.pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 14px;
+}
+.pair > .card { margin-bottom: 0; }
+@media (max-width: 720px) {
+  .pair { grid-template-columns: 1fr; }
+}
+
+/* ---------- 需要处理的事（首屏固定条） ---------- */
+
+/* 只在面板里提醒，不推送。这意味着「不打开面板就不知道」，
+   所以它必须比任何卡片都靠前：排在最前一级、颜色随级别变。
+
+   刻意**不**用 position:sticky：吸顶的那一条会盖住它下面的一切，
+   包括「刷新 / 试运行 / 立即清理」那排按钮。宁可往回滚一段再看，
+   也不要让操作点不动。 */
+.notice {
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--line-strong);
+  border-left-width: 4px;
+  border-radius: 12px;
+  background: var(--card-solid);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+}
+.notice[hidden] { display: none; }
+.notice.bad { border-left-color: var(--fail); }
+.notice.warn { border-left-color: var(--warn); }
+.notice.ok { border-left-color: var(--pass); }
+
+.notice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.notice-title { font-weight: 600; font-size: 13.5px; }
+.notice-items {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.notice-item {
+  display: grid;
+  grid-template-columns: 6px 1fr auto;
+  gap: 9px;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.notice-item b { color: var(--text); font-weight: 600; margin-right: 7px; }
+.notice-item .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  align-self: center;
+}
+.notice-item .n-body { min-width: 0; }
+.notice-item.bad { color: var(--fail); }
+.notice-item.warn { color: var(--warn); }
+.notice-item.info { color: var(--muted); }
+.notice-item .n-time {
+  color: var(--skip);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.notice-foot { margin-top: 8px; }
+
 /* ---------- 头部 ---------- */
 
 .head {
@@ -245,6 +327,24 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 6px; }
 
 .muted { color: var(--muted); font-size: 12px; }
 
+/* 小节标题：只读的部分与可编辑的部分得让人一眼分清，
+   否则同一排地址出现两次时不知道哪个才是能改的。 */
+.section-label {
+  margin: 14px 0 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
 /* ---------- 按钮 ---------- */
 
 .btn {
@@ -301,10 +401,14 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 6px; }
   align-items: center;
   gap: 6px;
 }
-.badge.ok { background: rgba(52, 211, 153, 0.14); color: var(--pass); border-color: transparent; }
-.badge.bad { background: rgba(251, 113, 133, 0.14); color: var(--fail); border-color: transparent; }
-.badge.warn { background: rgba(251, 191, 36, 0.14); color: var(--warn); border-color: transparent; }
-.badge.off { background: rgba(128, 147, 173, 0.16); color: var(--skip); border-color: transparent; }
+/* 徽标底色写成写死的 rgba 就不跟主题了：light 主题的文字色换了，底色还是那套，
+   在白卡片上发脏。改成从当前主题的状态色现混。
+   每一对都先写一遍 rgba 兜底：不认 color-mix 的老 WebView 至少还有个底色，
+   否则整条声明失效，徽标变成没有底的浮字。 */
+.badge.ok { background: rgba(52, 211, 153, 0.14); background: color-mix(in srgb, var(--pass) 16%, transparent); color: var(--pass); border-color: transparent; }
+.badge.bad { background: rgba(251, 113, 133, 0.14); background: color-mix(in srgb, var(--fail) 16%, transparent); color: var(--fail); border-color: transparent; }
+.badge.warn { background: rgba(251, 191, 36, 0.14); background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); border-color: transparent; }
+.badge.off { background: rgba(128, 147, 173, 0.16); background: color-mix(in srgb, var(--skip) 18%, transparent); color: var(--skip); border-color: transparent; }
 
 /* 运行中的小圆点，带呼吸感 */
 .badge .pulse {
@@ -321,26 +425,94 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 6px; }
 
 /* ---------- 清理层 ---------- */
 
+/* 数字分三级。精致感一大半来自「字号有秩序」：以前所有数字一个样，
+   扫一眼抓不到重点，打开面板要先逐行读才知道该看哪个。 */
 .kv { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; }
 .kv span b { font-weight: 600; }
+.kv span { font-variant-numeric: tabular-nums; }
 .kv .ok { color: var(--pass); }
 .kv .bad { color: var(--fail); }
 .kv .warn { color: var(--warn); }
+.kv .sub { color: var(--skip); font-size: 11.5px; margin-left: 2px; }
+/* 频率、时间这类背景信息：比正文更小更灰，不与要看的数字抢视线 */
+.kv-dim { font-size: 12px; color: var(--muted); }
+.kv-dim span b { color: var(--muted); font-weight: 500; }
 
+.hero {
+  margin: 2px 0 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--primary);
+  border-radius: 12px;
+  background: linear-gradient(100deg, var(--glow-1), transparent 62%);
+}
+.hero-label { font-size: 11.5px; color: var(--muted); letter-spacing: 0.06em; }
+.hero-value {
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 26px var(--glow-1);
+}
+.hero-sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* 分组：先把「哪几层真该动手」说清楚，再谈细节 */
 .layers { display: flex; flex-direction: column; gap: 10px; }
+.lgroup { margin-bottom: 14px; }
+.lgroup:last-child { margin-bottom: 0; }
+.lgroup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 7px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line-strong);
+}
+.lgroup-title { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
+.lgroup-hint { font-size: 11.5px; color: var(--muted); }
+.lgroup-fold > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0;
+  list-style: none;
+  user-select: none;
+}
+.lgroup-fold > summary::-webkit-details-marker { display: none; }
+.lgroup-fold > summary::before { content: "▸ "; color: var(--skip); }
+.lgroup-fold[open] > summary::before { content: "▾ "; }
+.lgroup-fold > summary:hover { color: var(--text); }
 
 .layer {
   position: relative;
   border: 1px solid var(--line);
   border-left-width: 3px;
   border-radius: 10px;
-  padding: 11px 13px;
+  padding: 10px 13px 9px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.028), transparent 40%);
 }
 .layer.normal { border-left-color: var(--pass); }
-.layer.due { border-left-color: var(--warn); }
-.layer.due { box-shadow: 0 0 22px -6px var(--warn); }
-.layer.off { border-left-color: var(--skip); opacity: 0.72; }
+/* 超阈值：左边框加粗 + 呼吸点。余光扫到就知道有事，不必读字。 */
+.layer.due {
+  border-left-color: var(--warn);
+  border-left-width: 4px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 7%, transparent), transparent 46%);
+  box-shadow: 0 0 20px -8px var(--warn);
+}
+.layer.off { border-left-color: var(--skip); border-left-style: dashed; opacity: 0.66; }
+
+.pulse-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  vertical-align: middle;
+  animation: pulse 2s ease-in-out infinite;
+}
 
 .layer .head2 {
   display: flex;
@@ -350,8 +522,25 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 6px; }
   flex-wrap: wrap;
 }
 .layer .name { font-weight: 600; }
-.layer .amount { font-variant-numeric: tabular-nums; color: var(--primary); }
-.layer.off .amount { color: var(--muted); }
+.layer .amount {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.layer .over {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 14%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.layer.due .amount { color: var(--warn); }
+.layer.off .amount { color: var(--muted); font-size: 13px; font-weight: 400; }
 
 .bar {
   height: 5px;
@@ -366,13 +555,82 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 6px; }
   height: 100%;
   background: linear-gradient(90deg, var(--primary), var(--pass));
   box-shadow: 0 0 10px var(--glow-1);
-  transition: width 0.35s ease;
+  transform-origin: left center;
+  /* 宽度过渡靠不住：每轮询整块 innerHTML 重建，新元素没有旧宽度可过渡，
+     结果是「啪」地跳过去。改用 scaleX 从 0 展开——合成属性，重建后自然重播，
+     反而能看出数据在动。 */
+  animation: bar-in 0.45s ease both;
+}
+@keyframes bar-in {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }
 .layer.due .bar > i { background: linear-gradient(90deg, var(--warn), var(--fail)); }
 
-.layer .meta { color: var(--muted); font-size: 12px; }
-.layer .last { color: var(--muted); font-size: 12px; margin-top: 2px; opacity: 0.85; }
-.layer .err { color: var(--fail); font-size: 12px; margin-top: 2px; }
+/* 三层文字：why 是结论（最重要）、detail 是背景、last 是时间戳（最不重要） */
+.layer .logs {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: 5px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.16);
+}
+.layer .why { color: var(--muted); font-size: 12px; margin-top: 5px; }
+/* 三层文字合成一行：why（结论）、detail（背景）、when（时间）由重到轻。
+   分成三行时每张层卡要占四行，六层就是二十四行，滚半天看不到头。 */
+.layer .last {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.layer .when { color: var(--skip); }
+.layer .err { color: var(--fail); font-size: 11.5px; }
+
+/* 危险操作不该比状态还显眼：平时低调，悬停才显形 */
+.danger-hover {
+  opacity: 0.35;
+  padding: 2px 8px;
+  font-size: 11px;
+  transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+}
+.layer:hover .danger-hover { opacity: 0.85; }
+.danger-hover:hover {
+  opacity: 1;
+  border-color: var(--fail);
+  color: var(--fail);
+}
+
+/* 可调项：改的概率极低，却占着整屏四分之一。默认折起来。 */
+.card > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.card > summary::-webkit-details-marker { display: none; }
+.card > summary::after {
+  content: "展开";
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+.card[open] > summary::after { content: "收起"; }
+.card > summary:hover::after { color: var(--text); }
+.card .fold-body { padding-top: 12px; }
 
 /* ---------- 表单 ---------- */
 
@@ -435,9 +693,21 @@ code {
   border-top: 1px dashed var(--line);
 }
 .discover .cand .path,
-.plugin .id { flex: 1; word-break: break-all; }
+.plugin .id { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .discover .cand.off { color: var(--muted); }
 .plugin .n { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 插件 ID 单独一列并且不折行：和名字挤在同一格里时，
+   「astrbot_plugin_humanoid_core」会在中间断开成两段。 */
+.plugin .pid {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  color: var(--skip);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .plugins { display: flex; flex-direction: column; }
 
 .results { display: flex; flex-direction: column; gap: 8px; }
@@ -460,10 +730,20 @@ code {
 }
 .result .name { font-weight: 600; }
 .result .meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.result .detail { font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-all; }
+.result .detail { font-size: 12px; color: var(--muted); margin-top: 3px; overflow-wrap: anywhere; }
 .result .detail.bad { color: var(--fail); }
 
-.empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+/* 空状态和「有数据」长得完全不一样，页面看着像加载坏了。
+   同页面的列表已经在用虚线分隔，这里沿用同一套语言。 */
+.empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  text-align: center;
+}
 
 .banner {
   border: 1px solid var(--line);
@@ -475,57 +755,173 @@ code {
   line-height: 1.7;
   word-break: break-word;
 }
-.banner.bad { border-left-color: var(--fail); background: rgba(251, 113, 133, 0.08); }
-.banner.warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.08); }
-.banner.ok { border-left-color: var(--pass); background: rgba(52, 211, 153, 0.08); }
+.banner.bad { border-left-color: var(--fail); background: rgba(251, 113, 133, 0.08); background: color-mix(in srgb, var(--fail) 9%, transparent); }
+.banner.warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.08); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.banner.ok { border-left-color: var(--pass); background: rgba(52, 211, 153, 0.08); background: color-mix(in srgb, var(--pass) 9%, transparent); }
 .banner.hidden { display: none; }
+
+/* 刷新中：静默重绘看不出数据在动，给一颗转圈的小点 */
+.spin {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 一行一个发现 ---------- */
+
+/* 之前地址和说明挤在同一行，说明一长就把地址压到几十像素宽，
+   「http://127.0.0.1:3002」被逐字符拆成「htt p:// 12 7.0. 0.1: 300 2」。
+   放不下时换两行，别硬挤。 */
+.find {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-top: 1px dashed var(--line);
+}
+.find:first-child { border-top: none; }
+.find-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.find-url { font-weight: 600; overflow-wrap: anywhere; }
+.find-why { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.find-why.bad { color: var(--fail); }
+
+/* ---------- 实例状态表 ---------- */
+
+/* 以前一个挂着的实例只会在一堆文字里理不清自己属于哪一种，
+   做成徽标跟在对应行后面，扫一眼就知道是哪一行有问题。 */
+.inst-table { margin-top: 10px; }
+.inst-table:empty { display: none; }
 
 /* ---------- 实例列表 ---------- */
 
 .inst-list { display: flex; flex-direction: column; gap: 8px; }
 .inst {
   display: grid;
-  grid-template-columns: 64px 1fr 1fr 84px 56px;
+  grid-template-columns: 86px 64px 1fr 1fr 84px 56px;
   gap: 8px;
   align-items: center;
 }
 .inst input[type="number"] { min-width: 0; }
+/* 状态跟在同一行，而不是另开一张表把地址重写一遍 */
+.inst-state { display: flex; justify-content: flex-end; }
+.inst-alert { margin-bottom: 10px; }
+.inst-alert .notice-item { padding: 3px 0; }
 
 /* ---------- 开场动画 ---------- */
 
-.intro { display: none; }
+/* 整条开场只碰 opacity 与 transform：这两个是合成层属性，不触发重排也不重算模糊，
+   平板上能跑满帧。以前的写法用 JS 逐帧插值 filter: blur()，blur 每一帧都要重新
+   计算一次合成，等于把整屏反复重绘，掉到 30 帧是必然的。
+   现在模糊交给 .intro-ghost 那一层——它的 blur 是写死的静态值，只被淡出。 */
 
-html.intro-on .intro {
-  display: flex;
+/* 节奏常量。改这里就能调整个开场的快慢，app.js 会读同一份。 */
+:root {
+  --intro-title-delay: 220ms;
+  --intro-title-in: 1400ms;    /* 标题 220 + 1400 = 1620 落定 */
+  --intro-ghost-out: 1500ms;   /* 模糊层散开的时长，与标题同步 */
+  --intro-sub-delay: 1100ms;   /* 副标题起点：必须早于 1620，否则就成接续了 */
+  --intro-sub-in: 800ms;
+  --intro-exit: 800ms;         /* 退幕 */
+}
+
+/* 不用「从透明淡入」。
+   之前是 opacity:0 → 1 的 520ms 过渡，**这 520ms 里幕布是半透明的，面板是亮的一闪而过**
+   ——用户看到的就是「白闪一下才开始动画」。
+   现在幕布默认就是盖住的不透明黑，JS 一上来直接放动画，中間不存在那个缝隙。
+
+   脚本整个没跑起来时的兜底：纯 CSS 计时，9 秒后幕布自己退开。
+   宁可极端情况下多等几秒，也换���「不白闪」和「永远不挡面板」两件事。 */
+.intro {
   position: fixed;
   inset: 0;
   z-index: 200;
+  display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-0);
   overflow: hidden;
+  background: var(--bg-0);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  animation: intro-bail 0.1s linear 12s forwards;
 }
 
-.intro-title,
-.intro-sub {
-  position: absolute;
-  opacity: 0;
-  will-change: transform, opacity;
+@keyframes intro-bail {
+  to { opacity: 0; visibility: hidden; pointer-events: none; }
 }
+
+/* 放完了。必须留一个永久隐藏的 class，不能直接把 intro-on / intro-out 摘干净——
+   .intro 的默认样式是「不透明可见」（为了第一帧不闪），一摘干净幕布就会**重新出现**，
+   表现为退场之后又闪一下，然后一直盖着。这个坑看起来像「卡住了」。 */
+html.intro-done .intro {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  animation: none;
+  transition: none;
+}
+
+html.intro-on.intro-out .intro {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--intro-exit) ease, visibility 0s linear var(--intro-exit);
+}
+
+/* 两层标题叠在同一个网格单元里：底下一层带静态模糊，上面一层清晰。 */
+.intro-title-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% - 30px);
+  display: grid;
+  text-align: center;
+}
+.intro-ghost,
+.intro-title { grid-area: 1 / 1; }
 
 /* 字距会在最后一个字母后面也留一份，向右偏移，所以要抵回来 */
-.intro-title {
-  top: calc(50% - 26px);
+.intro-title-wrap .intro-ghost,
+.intro-title-wrap .intro-title {
   font-size: 38px;
   font-weight: 600;
   letter-spacing: 0.14em;
   margin-right: -0.14em;
-  text-shadow: 0 0 30px var(--glow-1);
 }
+
+/* 模糊层：blur 是静态的，动画只让它淡出并微微收拢。 */
+.intro-ghost {
+  color: var(--text);
+  filter: blur(14px);
+  opacity: 0;
+  will-change: opacity, transform;
+}
+html.intro-on .intro-ghost {
+  animation: intro-ghost-out var(--intro-ghost-out) var(--intro-title-delay) ease forwards;
+}
+@keyframes intro-ghost-out {
+  from { opacity: 0.85; transform: scale(1.06); }
+  to { opacity: 0; transform: scale(1); }
+}
+
+.intro-title {
+  position: relative;
+  color: var(--text);
+  text-shadow: 0 0 30px var(--glow-1);
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
 
 .intro-sub {
   /* 不用 left:50% + translate(-50%) 居中：那样就永远移不掉位移。
      改成左右拉满 + 居中，元素可以完全不动。 */
+  position: absolute;
   left: 0;
   right: 0;
   top: calc(50% + 30px);
@@ -534,7 +930,24 @@ html.intro-on .intro {
   color: var(--muted);
   letter-spacing: 0.5em;
   margin-right: -0.5em;
+  opacity: 0;
 }
+
+/* 等数据的时候给一句实话。总时长是「动画 + 等数据 + 退场」，
+   数据慢的时候黑幕会停在标题上好几秒，看着就像卡死。 */
+.intro-wait {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 62px);
+  text-align: center;
+  font-size: 12px;
+  color: var(--skip);
+  letter-spacing: 0.08em;
+  opacity: 0;
+  animation: intro-wait-in 0.6s ease 1.4s forwards;
+}
+@keyframes intro-wait-in { to { opacity: 1; } }
 
 /* 周围的小白点，像星星。位置在 JS 里按固定种子生成，
    每次打开面板都是同一片，不会刷新一次换一次。 */
@@ -546,22 +959,44 @@ html.intro-on .intro {
   background: #fff;
   animation: twinkle linear infinite;
 }
+html.intro-on .intro-stars { animation: intro-stars-in 1400ms ease-out both; }
+@keyframes intro-stars-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 @keyframes twinkle {
   0%, 100% { opacity: var(--lo); }
   50% { opacity: var(--hi); }
 }
 
-/* 呼吸循环。注意 transform 必须把居中用的 translate(-50%) 也带上：
-   关键帧里只写 scale 会把水平居中顶掉，元素会突然向右跳半个身位。 */
+/* 呼吸循环。标题由 grid 居中，所以这里不需要水平位移。 */
 .intro-title.breathe { animation: breathe 5s ease-in-out infinite; }
 
 @keyframes breathe {
-  0%, 100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
-  50% { opacity: 0.9; transform: translate(-50%, 0) scale(1.012); }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.9; transform: scale(1.012); }
+}
+
+/* 开场期间不画卡片的毛玻璃。九张 blur(12px) 的图层躲在幕后面既看不见也白搭，
+   而真正贵的是退幕那一刻才第一次合成。intro-prep 会在幕还全黑时把它们加回来，
+   让那笔开销发生在看不见的时候。 */
+html.intro-on .card,
+html.intro-on .theme-bar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html.intro-on.intro-prep .card {
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+html.intro-on.intro-prep .theme-bar {
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 
 @media (max-width: 720px) {
-  .intro-title { font-size: 26px; }
+  .intro-title-wrap .intro-ghost,
+  .intro-title-wrap .intro-title { font-size: 26px; }
   .intro-sub { font-size: 12px; }
 }
 
@@ -677,6 +1112,7 @@ html.intro-on .intro {
 
 @media (max-width: 720px) {
   .inst { grid-template-columns: 1fr 1fr; }
+  .inst-state { display: none; }
   h1 { font-size: 19px; }
 }
 
