@@ -1560,7 +1560,7 @@ function renderPlatform(res) {
         ${e.port ? `<span class="badge off">端口 ${e.port}</span>` : ""}
         <span class="badge ${e.enable ? "ok" : "off"}">${e.enable ? "启用" : "已停用"}</span>
         ${e.orphan_port ? '<span class="badge warn">没找到对应的 NapCat</span>' : ""}
-        ${e.token_fp ? `<span class="muted">凭据 ${escapeHtml(e.token_fp)}</span>` : ""}
+        ${e.token_marker ? `<span class="muted">凭据 ${escapeHtml(e.token_marker)}</span>` : ""}
       </div>
     </div>`).join("");
     return head + rows;
@@ -1579,7 +1579,7 @@ function renderPlatform(res) {
        <span class="lgroup-hint">同一个端口只能绑一次</span></div>${conflicts}</div>` : "") +
     `<div class="lgroup"><div class="lgroup-head">
       <span class="lgroup-title">全部配置（${res.total} 条）</span>
-      <span class="lgroup-hint">凭据只比指纹，不显示原文</span></div>${blocks}</div>` +
+      <span class="lgroup-hint">凭据只编号比对，原文与派生值都不外发</span></div>${blocks}</div>` +
     '<p class="muted note">这一块<strong>只读</strong>。改平台配置要动 AstrBot 的核心配置，' +
     '删错一条可能让某个机器人直接掉线，所以这里只帮你把它找出来；' +
     '确认哪条是多余的之后，回 AstrBot 的「机器人」页面自己删。</p>';

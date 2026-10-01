@@ -11,7 +11,13 @@ from urllib.parse import urlsplit
 import aiohttp
 
 _ACTION_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_BEARER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+")
+
+# 脱敏改成「按已知凭据值替换」，不再按 "authorization: bearer xxx" 这种
+# 格式去猜。两点好处：
+#   1) 真的更严——凭据出现在 URL、json、header、错误文本里都能换掉，
+#      而按格式猜只能覆盖一种形态。
+#   2) 响应体里不认识的凭据一律不外传：只回状态码与错误类型。
+_LONG_OPAQUE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9_.-]{32,})(?![A-Za-z0-9])")
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # aiohttp 在模块加载时才可用，这里先取常量，失败则退化为按名字比较
@@ -111,10 +117,14 @@ class OneBotTransport:
             await session.close()
 
     def redact(self, text: str) -> str:
+        """把错误文本里的凭据换掉。
+
+        顺序很重要：先换掉自己知道的准确值，再对剩余的长随机串兜底。
+        """
         value = str(text or "")
         if self.access_token:
             value = value.replace(self.access_token, "***")
-        return _BEARER_RE.sub(r"\1***", value)
+        return _LONG_OPAQUE.sub("***", value)
 
     async def _pace(self) -> None:
         if self.request_interval_seconds <= 0:

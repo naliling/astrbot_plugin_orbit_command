@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import time
@@ -339,16 +338,19 @@ def _first_present(entry: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _token_fingerprint(value: Any) -> str:
-    """只留指纹，绝不把凭据送到面板上或日志里。
+def _token_marker(value: Any, table: dict[str, int]) -> str:
+    """给凭据一个**只在本页有效**的编号（#1 / #2…），不发任何派生值。
 
-    同一条 NapCat 的 token 在两份配置里是一样的——这正是判断「完全重复」
-    的依据，而这个指纹足够判等，又不会泄露任何东西。
+    判断「两条配置凭据是不是同一个」只需要等号关系，不需要凭据本身，
+    更不需要它的哈希——哈希同样是凭据的确定性派生值，仍属于可关联的指纹。
+    编号只活在这一轮体检里，对外没有任何意义，也无从反推。
     """
     text = str(value or "").strip()
     if not text:
         return ""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    if text not in table:
+        table[text] = len(table) + 1
+    return f"#{table[text]}"
 
 
 def platform_audit_sync(config_dirs: list[str] | None = None) -> dict[str, Any]:
@@ -365,6 +367,7 @@ def platform_audit_sync(config_dirs: list[str] | None = None) -> dict[str, Any]:
         "files": [], "conflicts": [], "total": 0, "error": "",
     }
     entries: list[dict[str, Any]] = []
+    markers: dict[str, int] = {}
     for path in _config_files():
         try:
             doc = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -385,7 +388,9 @@ def platform_audit_sync(config_dirs: list[str] | None = None) -> dict[str, Any]:
                 continue
             name = _first_present(item, _NAME_KEYS)
             port = _first_present(item, _PORT_KEYS)
-            fingerprint = _token_fingerprint(_first_present(item, _TOKEN_KEYS))
+            fingerprint = _token_marker(
+                _first_present(item, _TOKEN_KEYS), markers
+            )
             try:
                 port = int(port) if port not in (None, "") else 0
             except (TypeError, ValueError):
@@ -395,7 +400,7 @@ def platform_audit_sync(config_dirs: list[str] | None = None) -> dict[str, Any]:
                 "name": str(name or f"第 {index + 1} 条"),
                 "enable": item.get("enable", True) is not False,
                 "port": port,
-                "token_fp": fingerprint,
+                "token_marker": fingerprint,
                 "adapter": str(_first_present(item, _ADAPTER_KEYS) or ""),
                 "file": str(path),
                 "file_name": path.stem,
@@ -416,7 +421,7 @@ def platform_audit_sync(config_dirs: list[str] | None = None) -> dict[str, Any]:
         if len(group) < 2:
             continue
         names = [f"{g['file_name']} / {g['name']}" for g in group]
-        identical = len({g["token_fp"] for g in group if g["token_fp"]}) == 1
+        identical = len({g["token_marker"] for g in group if g["token_marker"]}) == 1
         result["conflicts"].append({
             "kind": "duplicate" if identical else "port",
             "port": port,

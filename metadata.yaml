@@ -10,7 +10,7 @@ desc: |
 
   装上就干活。停用插件时顺手清内存，到点自动清缓存，缓存目录自己搜自己认。
   你只需要点一次「试运行」，看看它到底会删什么。
-version: "1.5.0"
+version: "1.5.1"
 author: 娜莉灵
 repo: https://github.com/naliling/astrbot_plugin_orbit_command
 astrbot_version: ">=4.27.5,<5"
