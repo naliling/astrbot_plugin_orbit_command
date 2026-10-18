@@ -36,6 +36,7 @@ from .maintenance import (
     ModuleCacheManager,
 )
 from .napcat import NapCatCacheClient, NapCatEndpoint
+from .probe import build_probe_report
 from .spaces import (
     log_inventory,
     platform_audit,
@@ -350,6 +351,7 @@ class OrbitCachePlugin(Star):
         )
         reg(f"/{PLUGIN_ID}/spaces", self.api_spaces, ["GET"], "空间地图（只读）")
         reg(f"/{PLUGIN_ID}/logs", self.api_logs, ["GET"], "日志盘点（只读）")
+        reg(f"/{PLUGIN_ID}/probe", self.api_probe, ["GET"], "存储深度归因（只读）")
         reg(f"/{PLUGIN_ID}/platform", self.api_platform_audit, ["GET"], "平台配置体检")
         reg(f"/{PLUGIN_ID}/attention", self.api_attention, ["POST"], "标记需要处理的事已读")
         reg(f"/{PLUGIN_ID}/junk", self.api_junk, ["GET"], "插件目录里的客观垃圾")
@@ -443,6 +445,22 @@ class OrbitCachePlugin(Star):
             "终端里的输出与 WebUI 日志面板读的是同一份文件；如果这里显示 0，"
             "多半是日志写在别处，把实际路径填到「日志目录」里即可。"
         )
+        return json_response(payload)
+
+    async def api_probe(self):
+        """只读：部署能力 + 存储深度归因（按目录/类型/插件/文件/表）。
+
+        遍历目录树要真读盘，所以丢到线程里，别卡事件循环。
+        """
+        try:
+            payload = await asyncio.to_thread(
+                build_probe_report,
+                str(self._data_path()),
+                str(StarTools.get_data_dir(PLUGIN_ID)),
+            )
+        except Exception as exc:
+            return error_response(_friendly_error("存储归因", exc), status_code=500)
+        payload["note"] = "只读统计，不删任何东西；历史采样写在插件自己的数据目录。"
         return json_response(payload)
 
     async def api_dead_instances(self):

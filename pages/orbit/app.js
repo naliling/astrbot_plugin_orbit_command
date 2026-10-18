@@ -283,6 +283,7 @@ function bindEvents() {
   $("btn-dead").onclick = checkDead;
   $("btn-platform").onclick = checkPlatform;
   $("btn-spaces").onclick = showSpaces;
+  $("btn-probe").onclick = showProbe;
   $("btn-junk").onclick = showJunk;
   $("btn-junk-all").onclick = purgeAllJunk;
   $("notice-dead").onclick = checkDead;
@@ -1631,6 +1632,71 @@ function renderSpaces(res) {
     `<span>耗时 ${Number(res.elapsed_ms) || 0} ms</span></div>` + html + warn +
     '<p class="muted note">纯只读统计。标了「没人用的」是插件卸载后留下的数据目录，' +
     '插件只会提示不自动删——里面可能有你特意留着的东西。</p>';
+}
+
+// ---------- 存储深度归因（只读） ----------
+
+async function showProbe() {
+  const btn = $("btn-probe");
+  btn.disabled = true;
+  $("probe").innerHTML = '<div class="empty">正在拆解存储占用…</div>';
+  try {
+    const res = await bridge.apiGet("probe");
+    renderProbe(res);
+  } catch (e) {
+    $("probe").innerHTML = `<div class="empty">统计失败：${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function probeGroup(title, rows) {
+  if (!rows || !rows.length) return "";
+  const head = `<div class="find"><div class="find-top"><span class="find-url">${escapeHtml(title)}</span></div></div>`;
+  return head + rows.map((r) => `<div class="find"><div class="find-top">
+      <span class="find-url">${escapeHtml(r.name)}</span>
+      <span class="n">${escapeHtml(r.size)}</span>
+    </div></div>`).join("");
+}
+
+function renderProbe(res) {
+  const parts = [];
+  parts.push(
+    `<div class="kv"><span>合计：<b>${escapeHtml(res.total_human || "")}</b></span>` +
+    `<span>${Number(res.file_count) || 0} 个文件</span></div>`,
+  );
+
+  const g = res.growth || {};
+  if (g.mb_per_day != null) {
+    const tail = g.days_to_threshold != null
+      ? `，按这个速度约 ${g.days_to_threshold} 天后到 ${Number(res.threshold_mb) || 0} MB`
+      : "";
+    parts.push(`<p class="muted note">增长 ${g.mb_per_day} MB/天${tail}（样本 ${Number(g.samples) || 0} 个）</p>`);
+  } else {
+    parts.push('<p class="muted note">增长：再跑一次就能估算（两次间隔需 ≥30 分钟）。</p>');
+  }
+
+  const pick = (obj, limit) => Object.entries(obj || {}).slice(0, limit)
+    .map(([k, v]) => ({ name: k, size: v.human }));
+
+  parts.push(probeGroup("按插件归因", pick(res.by_plugin, 8)));
+  parts.push(probeGroup("按目录", pick(res.by_dir, 8)));
+  parts.push(probeGroup("按类型", pick(res.by_type, 8)));
+
+  const dbs = (res.databases || []).map((d) => ({
+    name: String(d.path || "").split(/[\\/]/).pop(),
+    size: humanBytes(d.bytes || 0) + (d.wal_bytes ? ` +WAL ${humanBytes(d.wal_bytes)}` : ""),
+  }));
+  parts.push(probeGroup("数据库", dbs));
+
+  const big = (res.largest || []).slice(0, 5).map((f) => ({
+    name: String(f.path || "").split(/[\\/]/).pop(),
+    size: f.human,
+  }));
+  parts.push(probeGroup("最大的文件", big));
+
+  parts.push('<p class="muted note">只读统计，不删任何东西；历史采样写在插件自己的数据目录。</p>');
+  $("probe").innerHTML = parts.join("");
 }
 
 // ---------- 插件目录里的客观垃圾 ----------
